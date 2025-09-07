@@ -7,8 +7,8 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 from zoneinfo import ZoneInfo
 
 # ====== ОКРУЖЕНИЕ ======
-BOT_TOKEN  = os.environ["BOT_TOKEN"]
-CHANNEL_ID = os.environ["CHANNEL_ID"]              # @USDT_Dollar или -100xxxxxxxxx
+BOT_TOKEN  = os.environ["8304198834:AAFmxWDHpFMQebf_Ns0TQi3B8nRldqgbxJg"]
+CHANNEL_ID = os.environ["usdtdollarm"]              # @USDT_Dollar или -100xxxxxxxxx
 TIMEZONE   = os.environ.get("TIMEZONE", "Europe/Moscow")
 
 # Русские источники (можно менять)
