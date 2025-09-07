@@ -1,9 +1,9 @@
-import os, io, json, time, textwrap, pathlib, hashlib, urllib.parse, sys
+import os, io, json, time, textwrap, pathlib, hashlib, urllib.parse, sys, random
 from datetime import datetime, timezone
 from dateutil import parser as dtparse
 import feedparser, requests
 from bs4 import BeautifulSoup
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 from zoneinfo import ZoneInfo
 
 # ====== ОКРУЖЕНИЕ ======
@@ -11,7 +11,7 @@ BOT_TOKEN  = os.environ["BOT_TOKEN"]
 CHANNEL_ID = os.environ["CHANNEL_ID"]              # @USDT_Dollar или -100xxxxxxxxx
 TIMEZONE   = os.environ.get("TIMEZONE", "Europe/Moscow")
 
-# Русские источники
+# Русские источники (можно менять)
 RSS_FEEDS = [
     "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",  # РБК
     "https://lenta.ru/rss/news",                          # Lenta.ru
@@ -21,9 +21,9 @@ RSS_FEEDS = [
 ]
 
 # Хэштеги
-TAGS = "#новости #рынки #акции #экономика #usdt #доллар"
+TAGS = "#новости #рынки #экономика #акции #usdt #доллар"
 
-# Состояние (дедупликация)
+# Состояние (дедупликация по каждому фиду)
 DATA_DIR = pathlib.Path("data"); DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
 
@@ -57,92 +57,121 @@ def make_caption(title, summary, link):
         caption = f"💵 {title}\n— {summary}\n\n🔗 Источник: {link}\n{TAGS}"
     return caption
 
-# --- эвристика тональности ---
-POS_WORDS = ["рост", "выше", "подорожал", "укрепил", "рекорд", "вырос", "повысил", "улучш", "прибыль", "оптимизм", "подъем"]
-NEG_WORDS = ["падени", "ниже", "подешев", "ослаб", "обвал", "кризис", "снижен", "ухудшен", "убыток", "страх", "паник", "спад"]
+# --- подбор ключевых слов для фоновой картинки ---
+KEYMAP = [
+    (["ФРС","ставк","инфляц","CPI","PPI","процент"], "interest rates,economy,bank"),
+    (["нефть","брент","wti","oil","ОПЕК"], "oil,barrels,energy,refinery"),
+    (["газ","газпр","lng","газопровод"], "natural gas,energy,pipeline"),
+    (["рубл","ruble","руб"], "ruble,currency,money"),
+    (["доллар","usd","dxy","usdt"], "dollar,currency,finance"),
+    (["биткоин","bitcoin","btc","крипт","crypto","ether","eth"], "crypto,blockchain,bitcoin,ethereum"),
+    (["акци","индекс","s&p","nasdaq","рынок","биржа"], "stocks,stock market,ticker,wall street"),
+    (["евро","eur"], "euro,currency,finance"),
+    (["золото","gold","xau"], "gold,precious metal,ingots"),
+]
 
-def sentiment(text):
-    t = (text or "").lower()
-    pos = any(w in t for w in POS_WORDS)
-    neg = any(w in t for w in NEG_WORDS)
-    if pos and not neg: return "pos"
-    if neg and not pos: return "neg"
-    return "neutral"
+def pick_photo_query(title, summary):
+    text = f"{title} {summary}".lower()
+    for keys, q in KEYMAP:
+        if any(k.lower() in text for k in keys):
+            return q
+    # fallback — общая финансовая тема
+    return "finance,markets,city night,news"
 
-# --- карточка 1080x540 ---
-def draw_card(title_text, src_domain, summary_text=""):
-    BRAND = "USDT=Dollar"
-    W, H = 1920, 1980 
+def fetch_unsplash_image(query, w=1080, h=540):
+    # Без API-ключа: используем публичный источник случайных фото
+    # Пример: https://source.unsplash.com/1080x540/?finance,stocks
+    seed = random.randint(0, 10_000_000)
+    url = f"https://source.unsplash.com/{w}x{h}/?{urllib.parse.quote(query)}&sig={seed}"
+    r = requests.get(url, timeout=25)
+    r.raise_for_status()
+    try:
+        img = Image.open(io.BytesIO(r.content)).convert("RGB")
+        return img
+    except Exception:
+        return None
 
-    tone = sentiment(f"{title_text} {summary_text}")
-    if tone == "pos":
-        bg = (8, 94, 60)      # зелёный
-        accent = (16, 185, 129)
-        arrow = "↑"
-    elif tone == "neg":
-        bg = (120, 22, 34)    # красный
-        accent = (239, 68, 68)
-        arrow = "↓"
-    else:
-        bg = (18, 20, 22)     # нейтральный
-        accent = (100, 116, 139)
-        arrow = "→"
+def ensure_bg(img, w=1080, h=540):
+    if img is None:
+        # запасной вариант — градиент
+        bg = Image.new("RGB", (w, h), (24, 26, 28))
+        return bg
+    # подровняем размер/кадрирование
+    img = img.resize((w, h))
+    # немного размытия + затемнение, чтобы текст читался
+    img = img.filter(ImageFilter.GaussianBlur(radius=0.6))
+    img = ImageEnhance.Brightness(img).enhance(0.8)
+    return img
 
-    text_main  = (240, 240, 240)
-    text_muted = (200, 200, 200)
-    black = (0, 0, 0)
+# --- карточка 1080x540, цитата на фоне картинки ---
+def draw_card_quote(title_text, summary_text, src_domain, tzname):
+    W, H = 1080, 540
+    # подбираем фон
+    query = pick_photo_query(title_text, summary_text)
+    bg = ensure_bg(fetch_unsplash_image(query, W, H), W, H)
+    d = ImageDraw.Draw(bg)
 
-    img = Image.new("RGB", (W, H), bg)
-    d = ImageDraw.Draw(img)
+    # затемняем центр под текст (мягкая плашка)
+    overlay = Image.new("RGBA", (W, H), (0,0,0,0))
+    od = ImageDraw.Draw(overlay)
+    od.rectangle([40, 100, W-40, H-80], fill=(0,0,0,120), outline=None, width=0, radius=28)
+    bg = Image.alpha_composite(bg.convert("RGBA"), overlay).convert("RGB")
+
+    d = ImageDraw.Draw(bg)
 
     # Шрифты
-    font_brand   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
-    font_time    = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
-    font_title   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 56)
-    font_summary = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 34)
-    font_small   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 26)
-    font_arrow   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 64)
+    font_brand   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 34)
+    font_time    = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 26)
+    font_quote   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 40)
+    font_title   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 50)
+    font_small   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
+    font_quote_mark = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 80)
 
-    # Верхняя плашка
-    d.rectangle([(0,0),(W,90)], fill=accent)
-    d.text((28, 26), BRAND, fill=black, font=font_brand)
+    # Верх: бренд + время
+    brand = "USDT=Dollar"
+    d.text((48, 30), brand, fill=(255,255,255), font=font_brand)
 
-    # Локальное время
     try:
-        tz = ZoneInfo(TIMEZONE)
+        tz = ZoneInfo(tzname)
     except Exception:
         tz = ZoneInfo("UTC")
     now_str = datetime.now(tz).strftime("%d.%m %H:%M")
-    d.text((W - 28 - d.textlength(now_str, font=font_time), 26), now_str, fill=black, font=font_time)
+    d.text((W - 48 - d.textlength(now_str, font=font_time), 30), now_str, fill=(255,255,255), font=font_time)
 
-    # Индикатор тренда
-    d.text((W - 90, 100), arrow, fill=accent, font=font_arrow)
+    # Основной текст как цитата
+    margin_x = 72
+    y = 120
 
-    # Заголовок
-    margin_x = 40
-    y = 110
-    for line in textwrap.wrap(title_text, width=28)[:3]:
-        d.text((margin_x, y), line, font=font_title, fill=text_main)
-        y += 66
+    # Большая открывающая кавычка
+    d.text((margin_x - 20, y - 20), "“", fill=(255,255,255), font=font_quote_mark)
 
-    # Summary
+    # заголовок (жирный)
+    for line in textwrap.wrap(title_text.strip(), width=28)[:3]:
+        d.text((margin_x + 50, y), line, font=font_title, fill=(255,255,255))
+        y += 58
+
+    # краткий текст (обычный шрифт)
     if summary_text:
         short = summary_text.strip().replace("\n", " ")
-        if len(short) > 220:
-            short = short[:217] + "…"
-        y_sum = y + 8
+        if len(short) > 260:
+            short = short[:257] + "…"
+        y += 12
         for ln in textwrap.wrap(short, width=40):
-            if y_sum + 40 > H - 70:
+            if y + 42 > H - 100:
                 break
-            d.text((margin_x, y_sum), ln, font=font_summary, fill=text_main)
-            y_sum += 40
+            d.text((margin_x + 50, y), ln, font=font_quote, fill=(230,230,230))
+            y += 42
 
-    # Низ: источник
+    # Закрывающая кавычка
+    d.text((W - 110, H - 140), "”", fill=(255,255,255), font=font_quote_mark)
+
+    # Низ: источник домен
     src = f"source: {src_domain}"
-    d.text((margin_x, H - 48), src, font=font_small, fill=text_muted)
+    d.text((72, H - 56), src, font=font_small, fill=(220,220,220))
 
+    # Итог — в память
     bio = io.BytesIO()
-    img.save(bio, format="PNG", optimize=True)
+    bg.save(bio, format="PNG", optimize=True)
     bio.seek(0)
     return bio
 
@@ -156,8 +185,11 @@ def send_photo(photo_bytes, caption):
 
 # ====== ЛОГИКА ======
 def process_item(link, title, summary):
+    # Подпись
     cap  = make_caption(title, summary, link or "")
-    card = draw_card(title, domain(link or ""), summary)
+    # Карточка-цитата на фоне подходящей картинки
+    card = draw_card_quote(title, summary, domain(link or ""), TIMEZONE)
+    # Публикация
     send_photo(card, cap)
 
 def run_cron_mode():
@@ -184,12 +216,12 @@ def run_cron_mode():
         last_uid  = state.get(feed_url, "")
 
         if entry_uid == last_uid:
-            continue
+            continue  # уже постили эту последнюю запись этого фида
 
         try:
             process_item(link, title, summary)
             state[feed_url] = entry_uid
-            time.sleep(1.2)
+            time.sleep(1.0)  # маленькая пауза между источниками
         except Exception as e:
             print("Error sending:", e)
 
