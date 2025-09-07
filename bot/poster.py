@@ -12,11 +12,23 @@ CHANNEL_ID = os.environ["CHANNEL_ID"]  # пример: @USDT_Dollar
 
 # Белый список RSS-источников (можешь менять/добавлять)
 RSS_FEEDS = [
-    "http://feeds.reuters.com/reuters/worldNews",
-    "http://feeds.reuters.com/reuters/businessNews",
-    "https://apnews.com/apf-topnews?output=rss",
-    "https://www.coindesk.com/arc/outboundfeeds/rss/",
-    "https://www.theblock.co/rss"
+    # Белый список RSS-источников (RU-медиа)
+RSS_FEEDS = [
+    # РБК (главные новости)
+    "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
+
+    # Lenta.ru (лента новостей)
+    "https://lenta.ru/rss/news",
+
+    # Газета.ru (общая лента)
+    "https://www.gazeta.ru/export/rss/lenta.xml",
+
+    # ТАСС (общая лента v2)
+    "https://tass.ru/rss/v2.xml",
+
+    # Коммерсантъ (новости)
+    "https://www.kommersant.ru/RSS/news.xml",
+
 ]
 
 # Хэштеги по умолчанию
