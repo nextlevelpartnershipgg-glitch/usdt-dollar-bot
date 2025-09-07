@@ -1,8 +1,8 @@
-name: USDT=Dollar Auto Poster
+name: USDT=Dollar Auto Poster (cron)
 
 on:
   schedule:
-    - cron: "*/30 * * * *"  # каждые 30 минут
+    - cron: "*/5 * * * *"  # каждые 5 минут (UTC)
   workflow_dispatch:
 
 permissions:
@@ -29,6 +29,7 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          TIMEZONE: ${{ vars.TIMEZONE }}
         run: |
           python bot/poster.py
 
