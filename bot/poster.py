@@ -6,12 +6,12 @@ from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 from zoneinfo import ZoneInfo
 
-# ====== ОКРУЖЕНИЕ ======
-BOT_TOKEN  = os.environ["8304198834:AAFmxWDHpFMQebf_Ns0TQi3B8nRldqgbxJg"]
-CHANNEL_ID = os.environ["usdtdollarm"]              # @USDT_Dollar или -100xxxxxxxxx
-TIMEZONE   = os.environ.get("TIMEZONE", "Europe/Moscow")
+# ============ НАСТРОЙКИ ============
+BOT_TOKEN  = os.environ.get("BOT_TOKEN")  # ОБЯЗАТЕЛЬНО через GitHub Secrets
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "@usdtdollarm")  # твой канал по умолчанию
+TIMEZONE   = os.environ.get("TIMEZONE", "Europe/Zurich")   # твой часовой пояс
 
-# Русские источники (можно менять)
+# Русские источники (можно менять/добавлять)
 RSS_FEEDS = [
     "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",  # РБК
     "https://lenta.ru/rss/news",                          # Lenta.ru
@@ -20,14 +20,15 @@ RSS_FEEDS = [
     "https://www.kommersant.ru/RSS/news.xml",             # Коммерсантъ
 ]
 
-# Хэштеги
+# Хэштеги под постом
 TAGS = "#новости #рынки #экономика #акции #usdt #доллар"
 
-# Состояние (дедупликация по каждому фиду)
+# Файл состояния (защита от повторов)
 DATA_DIR = pathlib.Path("data"); DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
 
-# ====== УТИЛИТЫ ======
+
+# ============ УТИЛИТЫ ============
 def load_state():
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -46,7 +47,7 @@ def clean_html(html):
     return " ".join(soup.get_text(separator=" ").split())
 
 def make_caption(title, summary, link):
-    title = title.strip()
+    title = (title or "").strip()
     summary = (summary or "").strip()
     if len(summary) > 300:
         summary = summary[:297] + "…"
@@ -57,13 +58,13 @@ def make_caption(title, summary, link):
         caption = f"💵 {title}\n— {summary}\n\n🔗 Источник: {link}\n{TAGS}"
     return caption
 
-# --- подбор ключевых слов для фоновой картинки ---
+# Подбор ключевых слов для фоновой картинки
 KEYMAP = [
-    (["ФРС","ставк","инфляц","CPI","PPI","процент"], "interest rates,economy,bank"),
-    (["нефть","брент","wti","oil","ОПЕК"], "oil,barrels,energy,refinery"),
-    (["газ","газпр","lng","газопровод"], "natural gas,energy,pipeline"),
+    (["фрс","ставк","инфляц","cpi","ppi","процент"], "interest rates,economy,bank"),
+    (["нефть","брент","wti","oil","опек"], "oil,barrels,energy,refinery"),
+    (["газ","lng","газопровод"], "natural gas,energy,pipeline"),
     (["рубл","ruble","руб"], "ruble,currency,money"),
-    (["доллар","usd","dxy","usdt"], "dollar,currency,finance"),
+    (["доллар","usd","dxy","usdt"], "dollar,currency,finance,wall street"),
     (["биткоин","bitcoin","btc","крипт","crypto","ether","eth"], "crypto,blockchain,bitcoin,ethereum"),
     (["акци","индекс","s&p","nasdaq","рынок","биржа"], "stocks,stock market,ticker,wall street"),
     (["евро","eur"], "euro,currency,finance"),
@@ -73,13 +74,12 @@ KEYMAP = [
 def pick_photo_query(title, summary):
     text = f"{title} {summary}".lower()
     for keys, q in KEYMAP:
-        if any(k.lower() in text for k in keys):
+        if any(k in text for k in keys):
             return q
-    # fallback — общая финансовая тема
     return "finance,markets,city night,news"
 
 def fetch_unsplash_image(query, w=1080, h=540):
-    # Без API-ключа: используем публичный источник случайных фото
+    # Публичный источник случайных фото (без API-ключа)
     # Пример: https://source.unsplash.com/1080x540/?finance,stocks
     seed = random.randint(0, 10_000_000)
     url = f"https://source.unsplash.com/{w}x{h}/?{urllib.parse.quote(query)}&sig={seed}"
@@ -93,30 +93,24 @@ def fetch_unsplash_image(query, w=1080, h=540):
 
 def ensure_bg(img, w=1080, h=540):
     if img is None:
-        # запасной вариант — градиент
-        bg = Image.new("RGB", (w, h), (24, 26, 28))
-        return bg
-    # подровняем размер/кадрирование
+        return Image.new("RGB", (w, h), (24, 26, 28))
     img = img.resize((w, h))
-    # немного размытия + затемнение, чтобы текст читался
     img = img.filter(ImageFilter.GaussianBlur(radius=0.6))
-    img = ImageEnhance.Brightness(img).enhance(0.8)
+    img = ImageEnhance.Brightness(img).enhance(0.85)
     return img
 
-# --- карточка 1080x540, цитата на фоне картинки ---
+# Карточка 1080x540: цитата поверх картинки
 def draw_card_quote(title_text, summary_text, src_domain, tzname):
     W, H = 1080, 540
-    # подбираем фон
     query = pick_photo_query(title_text, summary_text)
     bg = ensure_bg(fetch_unsplash_image(query, W, H), W, H)
     d = ImageDraw.Draw(bg)
 
-    # затемняем центр под текст (мягкая плашка)
+    # Полупрозрачная плашка для читаемости
     overlay = Image.new("RGBA", (W, H), (0,0,0,0))
     od = ImageDraw.Draw(overlay)
-    od.rectangle([40, 100, W-40, H-80], fill=(0,0,0,120), outline=None, width=0, radius=28)
+    od.rounded_rectangle([40, 90, W-40, H-70], radius=28, fill=(0,0,0,120))
     bg = Image.alpha_composite(bg.convert("RGBA"), overlay).convert("RGB")
-
     d = ImageDraw.Draw(bg)
 
     # Шрифты
@@ -129,32 +123,31 @@ def draw_card_quote(title_text, summary_text, src_domain, tzname):
 
     # Верх: бренд + время
     brand = "USDT=Dollar"
-    d.text((48, 30), brand, fill=(255,255,255), font=font_brand)
-
+    d.text((48, 26), brand, fill=(255,255,255), font=font_brand)
     try:
         tz = ZoneInfo(tzname)
     except Exception:
         tz = ZoneInfo("UTC")
     now_str = datetime.now(tz).strftime("%d.%m %H:%M")
-    d.text((W - 48 - d.textlength(now_str, font=font_time), 30), now_str, fill=(255,255,255), font=font_time)
+    d.text((W - 48 - d.textlength(now_str, font=font_time), 26), now_str, fill=(255,255,255), font=font_time)
 
-    # Основной текст как цитата
+    # Тело: кавычки, заголовок и короткий текст
     margin_x = 72
     y = 120
 
-    # Большая открывающая кавычка
+    # Открывающая кавычка
     d.text((margin_x - 20, y - 20), "“", fill=(255,255,255), font=font_quote_mark)
 
-    # заголовок (жирный)
-    for line in textwrap.wrap(title_text.strip(), width=28)[:3]:
+    # Заголовок (жирный)
+    for line in textwrap.wrap((title_text or "").strip(), width=28)[:3]:
         d.text((margin_x + 50, y), line, font=font_title, fill=(255,255,255))
         y += 58
 
-    # краткий текст (обычный шрифт)
-    if summary_text:
-        short = summary_text.strip().replace("\n", " ")
-        if len(short) > 260:
-            short = short[:257] + "…"
+    # Краткий текст
+    short = (summary_text or "").strip().replace("\n", " ")
+    if len(short) > 260:
+        short = short[:257] + "…"
+    if short:
         y += 12
         for ln in textwrap.wrap(short, width=40):
             if y + 42 > H - 100:
@@ -165,35 +158,35 @@ def draw_card_quote(title_text, summary_text, src_domain, tzname):
     # Закрывающая кавычка
     d.text((W - 110, H - 140), "”", fill=(255,255,255), font=font_quote_mark)
 
-    # Низ: источник домен
+    # Низ: источник
     src = f"source: {src_domain}"
     d.text((72, H - 56), src, font=font_small, fill=(220,220,220))
 
-    # Итог — в память
+    # В память
     bio = io.BytesIO()
     bg.save(bio, format="PNG", optimize=True)
     bio.seek(0)
     return bio
 
 def send_photo(photo_bytes, caption):
+    if not BOT_TOKEN:
+        raise RuntimeError("Нет BOT_TOKEN. Добавь секрет в GitHub: Settings → Secrets → Actions → BOT_TOKEN")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
     files = {"photo": ("cover.png", photo_bytes, "image/png")}
     data = {"chat_id": CHANNEL_ID, "caption": caption}
     r = requests.post(url, files=files, data=data, timeout=30)
+    # лог ответа для отладки
+    print("Telegram status:", r.status_code, r.text[:300])
     r.raise_for_status()
     return r.json()
 
-# ====== ЛОГИКА ======
-def process_item(link, title, summary):
-    # Подпись
-    cap  = make_caption(title, summary, link or "")
-    # Карточка-цитата на фоне подходящей картинки
-    card = draw_card_quote(title, summary, domain(link or ""), TIMEZONE)
-    # Публикация
-    send_photo(card, cap)
 
-def run_cron_mode():
-    state = load_state()
+# ============ ЛОГИКА ============
+def choose_freshest_entry():
+    """Выбираем САМУЮ свежую запись среди всех фидов."""
+    freshest = None
+    freshest_dt = datetime(1970,1,1, tzinfo=timezone.utc)
+
     for feed_url in RSS_FEEDS:
         fp = feedparser.parse(feed_url)
         if not fp.entries:
@@ -206,41 +199,49 @@ def run_cron_mode():
             except Exception:
                 return datetime(1970,1,1, tzinfo=timezone.utc)
 
-        entry = sorted(fp.entries, key=parse_dt, reverse=True)[0]
+        # самая свежая в этом фиде
+        e = sorted(fp.entries, key=parse_dt, reverse=True)[0]
+        edt = parse_dt(e)
+        if edt > freshest_dt:
+            freshest_dt = edt
+            freshest = (feed_url, e)
 
-        link    = getattr(entry, "link", "") or ""
-        title   = (getattr(entry, "title", "") or "").strip() or "(no title)"
-        summary = clean_html(getattr(entry, "summary", getattr(entry, "description", "")))
+    return freshest  # (feed_url, entry) или None
 
-        entry_uid = hashlib.sha256((link or title).encode("utf-8")).hexdigest()
-        last_uid  = state.get(feed_url, "")
+def process_item(link, title, summary):
+    cap  = make_caption(title, summary, link or "")
+    card = draw_card_quote(title, summary, domain(link or ""), TIMEZONE)
+    resp = send_photo(card, cap)
+    print("Posted:", (title or "")[:80], "→", resp.get("ok", True))
 
-        if entry_uid == last_uid:
-            continue  # уже постили эту последнюю запись этого фида
+def main():
+    state = load_state()
+    last_uid = state.get("last_uid", "")
 
-        try:
-            process_item(link, title, summary)
-            state[feed_url] = entry_uid
-            time.sleep(1.0)  # маленькая пауза между источниками
-        except Exception as e:
-            print("Error sending:", e)
-
-    save_state(state)
-
-def run_single_mode():
-    title   = os.environ.get("USDT_TITLE", "").strip()
-    link    = os.environ.get("USDT_LINK", "")
-    summary = clean_html(os.environ.get("USDT_SUM", ""))
-    if not title:
-        print("No USDT_TITLE provided")
+    chosen = choose_freshest_entry()
+    if not chosen:
+        print("No entries found in feeds.")
         return
+
+    feed_url, entry = chosen
+    link    = getattr(entry, "link", "") or ""
+    title   = (getattr(entry, "title", "") or "").strip() or "(no title)"
+    summary = clean_html(getattr(entry, "summary", getattr(entry, "description", "")))
+
+    # UID для защиты от повтора: хеш по ссылке/тайтлу/времени
+    ts = getattr(entry, "published", getattr(entry, "updated", "")) or ""
+    entry_uid = hashlib.sha256((link + "|" + title + "|" + ts).encode("utf-8")).hexdigest()
+
+    if entry_uid == last_uid:
+        print("Freshest item already posted, skip.")
+        return
+
     try:
         process_item(link, title, summary)
+        state["last_uid"] = entry_uid
+        save_state(state)
     except Exception as e:
-        print("Error sending single:", e)
+        print("Error sending:", e)
 
 if __name__ == "__main__":
-    if "--single" in sys.argv:
-        run_single_mode()
-    else:
-        run_cron_mode()
+    main()
