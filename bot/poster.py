@@ -7,11 +7,10 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 from zoneinfo import ZoneInfo
 
 # ============ НАСТРОЙКИ ============
-BOT_TOKEN  = os.environ.get("BOT_TOKEN")                    # GitHub Secrets
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "@usdtdollarm")   # куда постим (канал/группа)
-TIMEZONE   = os.environ.get("TIMEZONE", "Europe/Zurich")    # локаль времени на карточке
+BOT_TOKEN  = os.environ.get("BOT_TOKEN")
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "@usdtdollarm")
+TIMEZONE   = os.environ.get("TIMEZONE", "Europe/Zurich")
 
-# Бренд и ссылка на канал (для подписи в конце)
 CHANNEL_NAME   = os.environ.get("CHANNEL_NAME", "USDT=Dollar")
 CHANNEL_HANDLE = os.environ.get("CHANNEL_HANDLE", "@usdtdollarm")
 CHANNEL_LINK   = os.environ.get("CHANNEL_LINK", f"https://t.me/{CHANNEL_HANDLE.lstrip('@')}")
@@ -19,7 +18,7 @@ CHANNEL_LINK   = os.environ.get("CHANNEL_LINK", f"https://t.me/{CHANNEL_HANDLE.l
 MAX_POSTS_PER_RUN = int(os.environ.get("MAX_POSTS_PER_RUN", "5"))
 LOOKBACK_MINUTES  = int(os.environ.get("LOOKBACK_MINUTES", "90"))
 
-# RSS-источники: Россия/мир/крипта
+# RSS-источники
 RSS_FEEDS = [
     # Россия/СНГ
     "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
@@ -42,7 +41,7 @@ STATE_FILE = DATA_DIR / "state.json"
 UA  = {"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
 UA_IMG = {"User-Agent":"Mozilla/5.0"}
 
-# ============ БАЗОВЫЕ УТИЛИТЫ ============
+# ============ УТИЛИТЫ ============
 def load_state():
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -74,6 +73,9 @@ def clamp(s, n):
     s = (s or "").strip()
     return s if len(s) <= n else s[:n-1] + "…"
 
+def norm(s):
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
 # ============ ФОН (персона/предмет) ============
 COMPANY_HINTS = [
     "Apple","Microsoft","Tesla","Meta","Google","Alphabet","Amazon","Nvidia","Samsung","Intel","Huawei",
@@ -103,7 +105,7 @@ def fetch_unsplash_image(query, w=1080, h=540, retries=3):
         try:
             seed = random.randint(0, 10_000_000)
             url = f"https://source.unsplash.com/{w}x{h}/?{urllib.parse.quote(query)}&sig={seed}"
-            r = requests.get(url, headers={"User-Agent":"Mozilla/5.0"}, timeout=25, allow_redirects=True)
+            r = requests.get(url, headers=UA_IMG, timeout=25, allow_redirects=True)
             if r.status_code == 200:
                 return Image.open(io.BytesIO(r.content)).convert("RGB")
             time.sleep(0.8 * (i+1))
@@ -115,7 +117,7 @@ def fetch_picsum_image(w=1080, h=540):
     try:
         seed = random.randint(1, 10_000_000)
         url = f"https://picsum.photos/{w}/{h}?random={seed}"
-        r = requests.get(url, headers={"User-Agent":"Mozilla/5.0"}, timeout=20, allow_redirects=True)
+        r = requests.get(url, headers=UA_IMG, timeout=20, allow_redirects=True)
         if r.status_code == 200:
             return Image.open(io.BytesIO(r.content)).convert("RGB")
     except Exception:
@@ -175,7 +177,6 @@ def draw_title_card(title_text, src_domain, tzname):
     font_time   = ImageFont.truetype(path_reg, 26)
     font_small  = ImageFont.truetype(path_reg, 22)
 
-    # Верх: бренд + время
     d.text((48, 26), CHANNEL_NAME, fill=(255,255,255), font=font_brand)
     try:
         tz = ZoneInfo(tzname)
@@ -184,7 +185,6 @@ def draw_title_card(title_text, src_domain, tzname):
     now_str = datetime.now(tz).strftime("%d.%m %H:%M")
     d.text((W - 48 - d.textlength(now_str, font=font_time), 26), now_str, fill=(255,255,255), font=font_time)
 
-    # Заголовок в рамке
     box_x, box_y = 72, 150
     box_w, box_h = W - 2*box_x, H - box_y - 110
     font_title, lines = fit_title_in_box(d, (title_text or "").strip(), path_bold, box_w, box_h)
@@ -194,7 +194,6 @@ def draw_title_card(title_text, src_domain, tzname):
         d.text((box_x, y), ln, font=font_title, fill=(255,255,255))
         y += font_title.getbbox("Ag")[3] + 8
 
-    # Низ: домен
     src = f"source: {src_domain}"
     d.text((72, H - 58), src, font=font_small, fill=(225,225,225))
 
@@ -227,7 +226,7 @@ def fetch_article_text(url, max_chars=2400):
     except Exception:
         return ""
 
-# ============ ПАРАФРАЗ И 3 АБЗАЦА ============
+# ============ ПАРАФРАЗ И 3 АБЗАЦА (анти-дубликат) ============
 SYN_REPLACE = [
     (r"\bсообщает\b", "передаёт"),
     (r"\bсообщили\b", "уточнили"),
@@ -249,80 +248,101 @@ def paraphrase_sentence(s):
         out = re.sub(pat, repl, out, flags=re.IGNORECASE)
     return out
 
-def pick_topic_emojis(context):
-    t = context.lower()
-    if any(k in t for k in ["биткоин","crypto","btc","ethereum","крипт"]):
-        base = ("🪙","🔗")
-    elif any(k in t for k in ["акци","индекс","рынок","бирж","s&p","nasdaq","stocks"]):
-        base = ("📈","📉")
-    elif any(k in t for k in ["доллар","рубл","валют","курс","евро","юань","yuan","usd","eur","cny"]):
-        base = ("💵","💱")
-    elif any(k in t for k in ["нефть","газ","opec","брент","wti","энерги"]):
-        base = ("🛢️","⚡")
-    elif any(k in t for k in ["банк","ставк","фрс","цб","инфляц","cpi","ppi","кредит"]):
-        base = ("🏦","📊")
-    elif any(k in t for k in ["санкц","полит","переговор","президент","правительств"]):
-        base = ("🏛️","🤝")
-    else:
-        base = ("🗞️","🧠")
-    return [base, base, base]
+def pick_context_emoji_triplet(context):
+    t = (context or "").lower()
+    # Каждая тема возвращает ТРИ РАЗНЫЕ пары для (что случилось / детали / влияние)
+    THEMES = [
+        (["биткоин","crypto","btc","ethereum","крипт","stablecoin","defi","nft"], [("🪙","📰"),("🔗","📊"),("🚀","📉")]),
+        (["акци","индекс","рынок","бирж","nasdaq","nyse","s&p","sp500","dow"],   [("📈","📰"),("📊","🏦"),("📉","🧭")]),
+        (["доллар","рубл","валют","курс","евро","юань","usd","eur","cny","fx"],  [("💵","📰"),("💱","📊"),("🧭","🏦")]),
+        (["ставк","фрс","цб","центробанк","инфляц","cpi","ppi","qe","qt"],      [("🏦","📰"),("📊","💬"),("📉","🧭")]),
+        (["нефть","брент","wti","opec","газ","lng","энерги"],                    [("🛢️","📰"),("⚡","📊"),("🚚","🧭")]),
+        (["золото","xau","металл","серебро","commodit"],                          [("🥇","📰"),("📊","🔎"),("🏦","🧭")]),
+        (["банк","кредит","отчёт","earnings","profit","убыток"],                 [("🏦","📰"),("📊","🧾"),("🧭","💬")]),
+        (["ai","искусств","нейросет","chip","полупровод","nvidia","intel"],      [("🤖","📰"),("🧠","📊"),("⚙️","🧭")]),
+        (["санкц","эмбарго","пошлин","геополит","переговор","президент"],        [("🏛️","📰"),("🤝","📊"),("🧭","🌍")]),
+        (["ипотек","недвижим","real estate","housing"],                           [("🏠","📰"),("📊","🔑"),("🧭","💼")]),
+    ]
+    for keys, triplet in THEMES:
+        if any(k in t for k in keys):
+            return triplet
+    return [("🗞️","📰"),("📊","🔎"),("🧭","🧠")]  # дефолт
+
+def ensure_unique_paragraphs(p1, p2, p3, sents):
+    # Если абзацы совпадают по смыслу — добираем/заменяем предложениями
+    def uniq(a, b):
+        return norm(a) != norm(b) and a.strip() and b.strip()
+    if not uniq(p2, p1):
+        extra = " ".join(paraphrase_sentence(s) for s in sents[3:6]) or p2
+        p2 = clamp(extra, max(120, len(p1)))  # другой материал
+    if not uniq(p3, p2) or not uniq(p3, p1):
+        extra2 = " ".join(paraphrase_sentence(s) for s in sents[6:9]) or p3
+        p3 = clamp(extra2, max(120, len(p2)))
+    # финальная гарантия уникальности (обрежем/изменим форму)
+    if not uniq(p2, p1):
+        p2 = clamp(p2 + " Подробности уточняются.", len(p2)+40)
+    if not uniq(p3, p2) or not uniq(p3, p1):
+        p3 = clamp("Влияние: " + p3, len(p3)+20)
+    return p1, p2, p3
 
 def build_three_paragraphs(title, article_text, feed_summary):
     base = (article_text or "").strip() or (feed_summary or "").strip()
     sents = [s for s in split_sentences(base) if len(s) > 0]
+
+    # 1: суть (1–2 предложения)
     p1 = " ".join(paraphrase_sentence(s) for s in sents[:2]) or clamp(feed_summary, 250)
+    # 2: детали (2–3)
     p2 = " ".join(paraphrase_sentence(s) for s in sents[2:5]) or clamp(base, 300)
+    # 3: влияние / что дальше (до 3)
     p3_src = sents[5:8] or sents[:1]
     p3 = " ".join(paraphrase_sentence(s) for s in p3_src)
-    pairs = pick_topic_emojis(f"{title} {base}")
-    p1 = f"{pairs[0][0]}{pairs[0][1]} {p1}"
-    p2 = f"{pairs[1][0]}{pairs[1][1]} {p2}"
-    p3 = f"{pairs[2][0]}{pairs[2][1]} {p3}"
-    return clamp(p1, 320), clamp(p2, 360), clamp(p3, 360)
 
-# ============ УМНЫЕ ТЕГИ ПО СМЫСЛУ ============
+    # анти-дубликат
+    p1, p2, p3 = ensure_unique_paragraphs(p1, p2, p3, sents)
+
+    # эмодзи-триплет по контексту
+    trip = pick_context_emoji_triplet(f"{title} {base}")
+    p1 = f"{trip[0][0]}{trip[0][1]} {clamp(p1, 320)}"
+    p2 = f"{trip[1][0]}{trip[1][1]} {clamp(p2, 360)}"
+    p3 = f"{trip[2][0]}{trip[2][1]} {clamp(p3, 360)}"
+    return p1, p2, p3
+
+# ============ УМНЫЕ ТЕГИ ============
 def gen_smart_tags(title, text, entities, max_tags=6):
     t = f"{title} {text}".lower()
-
     buckets = []
     def add(tag): 
         if tag not in buckets:
             buckets.append(tag)
 
-    # Крипта
     if any(k in t for k in ["биткоин","bitcoin","btc","эфириум","ethereum","eth","крипт","stablecoin","usdt","usdc","bnb","solana","sol"]):
         add("#крипта"); 
         if "btc" in t or "биткоин" in t: add("#BTC")
         if "eth" in t or "эфириум" in t: add("#ETH")
 
-    # Валюты и курс
-    if any(k in t for k in ["доллар","usd","евро","eur","рубл","rub","юань","cny","курс","форекс","fx","fx-"]):
+    if any(k in t for k in ["доллар","usd","евро","eur","рубл","rub","юань","cny","курс","форекс","fx"]):
         add("#валюта")
         if any(k in t for k in ["usd","доллар"]): add("#USD")
         if any(k in t for k in ["eur","евро"]): add("#EUR")
         if any(k in t for k in ["рубл","rub"]): add("#RUB")
         if any(k in t for k in ["cny","юань","yuan"]): add("#CNY")
 
-    # Акции/индексы/рынки
     if any(k in t for k in ["акци","рынок","бирж","индекс","насдак","s&p","dow","мосбирж","nasdaq","nyse","sp500"]):
         add("#акции"); add("#рынки")
 
-    # Ставки/ЦБ/инфляция
-    if any(k in t for k in ["ставк","фрс","цб","центробанк","инфляц","cpi","ppi","qe","qt","вр-политика","монетарн"]):
+    if any(k in t for k in ["ставк","фрс","цб","центробанк","инфляц","cpi","ppi","qe","qt"]):
         add("#ставки"); add("#инфляция")
 
-    # Нефть/газ/энергетика
     if any(k in t for k in ["нефть","брент","wti","opec","газ","энерги","lng"]):
         add("#энергетика")
         if any(k in t for k in ["брент","brent"]): add("#Brent")
         if any(k in t for k in ["wti"]): add("#WTI")
         if "газ" in t: add("#газ")
 
-    # Санкции/политика (экономический контекст)
-    if any(k in t for k in ["санкц","эмбарго","пошлин","геополит","переговор","правительств","президент"]):
+    if any(k in t for k in ["санкц","эмбарго","пошлин","геополит","переговор","президент"]):
         add("#геополитика")
 
-    # Компании/тикеры как хэштеги
+    # Компании/тикеры
     for e in entities[:3]:
         if re.fullmatch(r"[A-Z]{2,6}", e):
             add(f"#{e}")
@@ -331,31 +351,57 @@ def gen_smart_tags(title, text, entities, max_tags=6):
             if 2 < len(name) <= 20:
                 add(f"#{name}")
 
-    # Урезаем до max_tags
+    # Итог
     return " ".join(buckets[:max_tags])
 
-# ============ КАПШЕН ============
+# ============ КАПШЕН (теги в самом конце) ============
 def build_caption(title, para1, para2, para3, link, tags_str):
     title = clamp(title, 200)
-    dom = root_domain(link) if link else "источник"
+    dom = root_domain(link) if link else None
     body = f"{para1}\n\n{para2}\n\n{para3}"
-    tail = f"{tags_str}\n[{CHANNEL_NAME}]({CHANNEL_LINK})"
-    cap = f"{title}\n\n{body}\n\nИсточник: [{dom}]({link})\n{tail}" if link else f"{title}\n\n{body}\n\n{tail}"
+    parts = [title, "", body]
 
-    # лимит подписи Telegram ~1024 → укорачиваем абзацы, если нужно
+    if dom:
+        parts += ["", f"Источник: [{dom}]({link})"]
+    else:
+        parts += ["", "Источник: неизвестно"]
+
+    # канал — перед тегами
+    parts += ["", f"[{CHANNEL_NAME}]({CHANNEL_LINK})"]
+
+    # в самом конце — теги, после пустой строки
+    if tags_str:
+        parts += ["", tags_str]
+
+    cap = "\n".join(parts)
+
+    # Лимит подписи ~1024: режем абзацы (3->2->1), сохраняя порядок концовки
     if len(cap) > 1024:
         over = len(cap) - 1024 + 3
-        # по очереди режем третий, второй, первый абзац
         p3 = clamp(para3[:-min(over, len(para3))], 300)
-        cap = f"{title}\n\n{para1}\n\n{para2}\n\n{p3}\n\n" + (f"Источник: [{dom}]({link})\n{tail}" if link else tail)
+        parts = [title, "", f"{para1}\n\n{para2}\n\n{p3}"]
+        if dom: parts += ["", f"Источник: [{dom}]({link})"]
+        else:   parts += ["", "Источник: неизвестно"]
+        parts += ["", f"[{CHANNEL_NAME}]({CHANNEL_LINK})", "", tags_str]
+        cap = "\n".join(parts)
+
         if len(cap) > 1024:
             over = len(cap) - 1024 + 3
             p2 = clamp(para2[:-min(over, len(para2))], 300)
-            cap = f"{title}\n\n{para1}\n\n{p2}\n\n{p3}\n\n" + (f"Источник: [{dom}]({link})\n{tail}" if link else tail)
+            parts = [title, "", f"{para1}\n\n{p2}\n\n{p3}"]
+            if dom: parts += ["", f"Источник: [{dom}]({link})"]
+            else:   parts += ["", "Источник: неизвестно"]
+            parts += ["", f"[{CHANNEL_NAME}]({CHANNEL_LINK})", "", tags_str]
+            cap = "\n".join(parts)
+
             if len(cap) > 1024:
                 over = len(cap) - 1024 + 3
                 p1 = clamp(para1[:-min(over, len(para1))], 280)
-                cap = f"{title}\n\n{p1}\n\n{p2}\n\n{p3}\n\n" + (f"Источник: [{dom}]({link})\n{tail}" if link else tail)
+                parts = [title, "", f"{p1}\n\n{p2}\n\n{p3}"]
+                if dom: parts += ["", f"Источник: [{dom}]({link})"]
+                else:   parts += ["", "Источник: неизвестно"]
+                parts += ["", f"[{CHANNEL_NAME}]({CHANNEL_LINK})", "", tags_str]
+                cap = "\n".join(parts)
     return cap
 
 # ============ ОТПРАВКА ============
@@ -396,26 +442,18 @@ def collect_entries():
             })
     return items
 
-# ============ ОДНА НОВОСТЬ: СБОР, ПАРАФРАЗ, КАРТОЧКА ============
+# ============ ОБРАБОТКА ОДНОЙ НОВОСТИ ============
 def process_item(link, title, feed_summary):
     article_text = fetch_article_text(link, max_chars=2400)
-
-    # 3 абзаца (перефраз)
     p1, p2, p3 = build_three_paragraphs(title, article_text, feed_summary)
 
-    # Умные теги по смыслу
     entities = extract_entities(title, f"{p1} {p2} {p3}")
     tags_str = gen_smart_tags(title, f"{p1} {p2} {p3}", entities, max_tags=6)
     if not tags_str:
         tags_str = "#новости"
 
-    # Подпись
     caption = build_caption(title, p1, p2, p3, link or "", tags_str)
-
-    # Карточка (только заголовок)
     card = draw_title_card(title, domain(link or ""), TIMEZONE)
-
-    # Отправка
     resp = send_photo(card, caption)
     print("Posted:", (title or "")[:80], "→", resp.get("ok", True))
 
