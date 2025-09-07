@@ -58,7 +58,7 @@ def clamp(s, n):
 
 def make_caption(title, summary, link, ctx_lines=None):
     title = clamp(title, 200)
-    summary = clamp(summary, 750)  # делаем длиннее для «развёрнуто»
+    summary = clamp(summary, 750)  # длиннее, т.к. «развёрнуто»
     lines = [f"💵 {title}", f"— {summary}"]
     if ctx_lines:
         lines += ["", "🧭 Контекст:"] + ctx_lines
@@ -66,20 +66,21 @@ def make_caption(title, summary, link, ctx_lines=None):
     cap = "\n".join(lines)
     # лимит подписи Telegram ~1024
     if len(cap) > 1024:
-        # урежем summary
         shrink = len(cap) - 1024 + 3
-        summary2 = clamp(summary[:-shrink], 730)
+        summary2 = clamp(summary[:-shrink] if shrink < len(summary) else summary, 730)
         lines[1] = f"— {summary2}"
         cap = "\n".join(lines)
     return cap
 
 # ---------- ФОН: Unsplash → Picsum → градиент ----------
+UA_IMG = {"User-Agent":"Mozilla/5.0"}
+
 def fetch_unsplash_image(query, w=1080, h=540, retries=3):
     for i in range(retries):
         try:
             seed = random.randint(0, 10_000_000)
             url = f"https://source.unsplash.com/{w}x{h}/?{urllib.parse.quote(query)}&sig={seed}"
-            r = requests.get(url, headers=UA, timeout=25, allow_redirects=True)
+            r = requests.get(url, headers=UA_IMG, timeout=25, allow_redirects=True)
             if r.status_code == 200:
                 return Image.open(io.BytesIO(r.content)).convert("RGB")
             time.sleep(0.8 * (i+1))
@@ -91,7 +92,7 @@ def fetch_picsum_image(w=1080, h=540):
     try:
         seed = random.randint(1, 10_000_000)
         url = f"https://picsum.photos/{w}/{h}?random={seed}"
-        r = requests.get(url, headers=UA, timeout=20, allow_redirects=True)
+        r = requests.get(url, headers=UA_IMG, timeout=20, allow_redirects=True)
         if r.status_code == 200:
             return Image.open(io.BytesIO(r.content)).convert("RGB")
     except Exception:
@@ -207,47 +208,38 @@ def send_photo(photo_bytes, caption):
     return r.json()
 
 # ---------- ПОЛУЧЕНИЕ РАЗВЁРНУТОГО ТЕКСТА ИЗ СТАТЬИ ----------
-def fetch_article_text(url, max_chars=1200):
+def fetch_article_text(url, max_chars=1600):
     try:
         r = requests.get(url, headers=UA, timeout=20)
         if r.status_code != 200:
             return ""
         soup = BeautifulSoup(r.text, "html.parser")
-        # берём осмысленные абзацы
         ps = soup.find_all("p")
         chunks = []
         for p in ps:
             t = p.get_text(" ", strip=True)
             if not t: continue
-            if len(t) < 60:  # выбрасываем короткие подписи
+            if len(t) < 60:
                 continue
-            # отсекаем мусор
             if any(x in t.lower() for x in ["javascript", "cookie", "подпишитесь", "реклама", "cookies"]):
                 continue
             chunks.append(t)
             if sum(len(c) for c in chunks) > max_chars:
                 break
         text = " ".join(chunks)
-        # уплотним
         text = re.sub(r"\s+", " ", text).strip()
         return text
     except Exception:
         return ""
 
 def expanded_summary(feed_summary, article_text, limit=900):
-    # приоритет: содержимое статьи, затем фид
-    base = (article_text or "").strip()
-    if not base:
-        base = (feed_summary or "").strip()
-    # возьмём 3–4 первых предложения
+    base = (article_text or "").strip() or (feed_summary or "").strip()
     sents = re.split(r"(?<=[.!?])\s+", base)
     out = " ".join(sents[:4]).strip()
     return clamp(out, limit)
 
 # ---------- СТРАНА + ГОС.ЛИЦА ----------
-# Упрощённое определение страны по ключевым словам (RU/EN)
-# ---------- СТРАНА + ГОС.ЛИЦА ----------
-# Упрощённое определение страны по ключевым словам (RU/EN)
+# (Название, ключевые слова, Wikidata QID)
 COUNTRIES = [
     ("Россия", ["россия","рф","москва","рубл","пути","россий"], "Q159"),
     ("США", ["сша","соединенные шт","washington","байден","доллар","фрс","белый дом"], "Q30"),
@@ -273,17 +265,9 @@ COUNTRIES = [
     ("Мексика", ["мексик","песо","mxn","обрадор","lopez obrador"], "Q96"),
 ]
 
-
 def detect_country(text):
     t = (text or "").lower()
-    for name, keys, q in [(n,k,q) for (n,k), q in [(x[:2], x[2]) for x in [ (c[0],c[1],c[2]) for c in [(a[0], a[1], a[2]) for a in [(*c, ) if len(c)==3 else c for c in [(c[0], c[1], c[2]) if len(c)==3 else (c[0], c[1], "Q0") for c in [ (*c, ) for c in COUNTRIES ]]]]]]:
-        pass  # (не используется; ниже — нормальная реализация)
-
-# нормальная, читабельная реализация detect_country (выше оставлен «pass», чтобы избежать путаницы)
-def detect_country(text2):
-    t = (text2 or "").lower()
-    for entry in COUNTRIES:
-        name, keys, qid = entry
+    for name, keys, qid in COUNTRIES:
         if any(k in t for k in keys):
             return {"name": name, "qid": qid}
     return None
@@ -301,8 +285,9 @@ def wikidata_officials(qid):
         r = requests.get(
             "https://query.wikidata.org/sparql",
             params={"query": query, "format": "json"},
-            headers={"Accept":"application/sparql-results+json","User-Agent":"usdtdollar-bot/1.0"}
-        , timeout=15)
+            headers={"Accept":"application/sparql-results+json","User-Agent":"usdtdollar-bot/1.0"},
+            timeout=15
+        )
         if r.status_code != 200:
             return (None, None)
         data = r.json()
