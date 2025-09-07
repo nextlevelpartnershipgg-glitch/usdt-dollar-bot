@@ -2,7 +2,7 @@ name: USDT=Dollar Auto Poster (cron)
 
 on:
   schedule:
-    - cron: "*/5 * * * *"  # каждые 5 минут (UTC)
+    - cron: "*/15 * * * *"  # каждые 15 минут (UTC)
   workflow_dispatch:
 
 permissions:
@@ -27,9 +27,9 @@ jobs:
 
       - name: Run poster
         env:
-          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
-          TIMEZONE: ${{ vars.TIMEZONE }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}     # ОБЯЗАТЕЛЬНО добавить в Settings → Secrets → Actions
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}   # можно не добавлять — по умолчанию @usdtdollarm
+          TIMEZONE: ${{ vars.TIMEZONE }}          # можно не добавлять — по умолчанию Europe/Zurich
         run: |
           python bot/poster.py
 
