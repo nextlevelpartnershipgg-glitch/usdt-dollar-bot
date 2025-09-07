@@ -1,1 +1,6 @@
-{}
+{
+  "https://rssexport.rbc.ru/rbcnews/news/30/full.rss": "223854c250866952189735ab2b4d6ed23578d89c82f32b7e8ce6c34ed675c097",
+  "https://lenta.ru/rss/news": "7d2fe05cd731eab6c50276ff35ea69ce1e8aac268c13dd8fce21095feb26e570",
+  "https://tass.ru/rss/v2.xml": "71db27285fc3368149b22a57f31836ba458359581bf7907c164a3756ed1901de",
+  "https://www.kommersant.ru/RSS/news.xml": "0e304c23ae3063f4ea151d9bba526eb4f73126252566f0431105aed2c4bd9188"
+}
