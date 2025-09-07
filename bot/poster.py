@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 from zoneinfo import ZoneInfo
 
 # ============ НАСТРОЙКИ ============
-BOT_TOKEN  = os.environ.get("BOT_TOKEN")                   # ОБЯЗАТЕЛЬНО через GitHub Secrets
+BOT_TOKEN  = os.environ.get("BOT_TOKEN")                   # ОБЯЗАТЕЛЬНО: GitHub Secrets
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "@usdtdollarm")  # твой канал по умолчанию
 TIMEZONE   = os.environ.get("TIMEZONE", "Europe/Zurich")   # твой часовой пояс
 
@@ -16,7 +16,7 @@ MAX_POSTS_PER_RUN = int(os.environ.get("MAX_POSTS_PER_RUN", "5"))
 # С какой давности брать новости (минут)
 LOOKBACK_MINUTES  = int(os.environ.get("LOOKBACK_MINUTES", "90"))
 
-# Русские источники
+# Источники
 RSS_FEEDS = [
     "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",  # РБК
     "https://lenta.ru/rss/news",                          # Lenta.ru
@@ -32,7 +32,8 @@ TAGS = "#новости #рынки #экономика #акции #usdt #до�
 DATA_DIR = pathlib.Path("data"); DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
 
-UA = {"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
+UA  = {"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
+UA_IMG = {"User-Agent":"Mozilla/5.0"}
 
 # ===== УТИЛИТЫ =====
 def load_state():
@@ -56,25 +57,23 @@ def clamp(s, n):
     s = (s or "").strip()
     return (s if len(s) <= n else s[:n-1] + "…")
 
-def make_caption(title, summary, link, ctx_lines=None):
+def make_caption(title, long_text, link, ctx_lines=None):
     title = clamp(title, 200)
-    summary = clamp(summary, 750)  # длиннее, т.к. «развёрнуто»
-    lines = [f"💵 {title}", f"— {summary}"]
+    summary = clamp(long_text, 850)  # развёрнутая выжимка
+    lines = [f"💵 {title}", f"{summary}"]
     if ctx_lines:
         lines += ["", "🧭 Контекст:"] + ctx_lines
     lines += ["", f"🔗 Источник: {link}", TAGS]
     cap = "\n".join(lines)
-    # лимит подписи Telegram ~1024
+    # лимит Telegram ~1024
     if len(cap) > 1024:
-        shrink = len(cap) - 1024 + 3
-        summary2 = clamp(summary[:-shrink] if shrink < len(summary) else summary, 730)
-        lines[1] = f"— {summary2}"
+        over = len(cap) - 1024 + 3
+        summary2 = clamp(summary[:-over] if over < len(summary) else summary, 820)
+        lines[1] = summary2
         cap = "\n".join(lines)
     return cap
 
 # ---------- ФОН: Unsplash → Picsum → градиент ----------
-UA_IMG = {"User-Agent":"Mozilla/5.0"}
-
 def fetch_unsplash_image(query, w=1080, h=540, retries=3):
     for i in range(retries):
         try:
@@ -104,58 +103,77 @@ def gradient_fallback(w=1080, h=540):
     img = Image.new("RGB", (w, h))
     draw = ImageDraw.Draw(img)
     for y in range(h):
-        alpha = y / (h-1)
-        r = int(top[0]*(1-alpha) + bottom[0]*alpha)
-        g = int(top[1]*(1-alpha) + bottom[1]*alpha)
-        b = int(top[2]*(1-alpha) + bottom[2]*alpha)
+        a = y/(h-1)
+        r = int(top[0]*(1-a) + bottom[0]*a)
+        g = int(top[1]*(1-a) + bottom[1]*a)
+        b = int(top[2]*(1-a) + bottom[2]*a)
         draw.line([(0,y),(w,y)], fill=(r,g,b))
     return img
 
-KEYMAP = [
-    (["фрс","ставк","инфляц","cpi","ppi","процент"], "interest rates,economy,bank"),
-    (["нефть","брент","wti","oil","опек"], "oil,barrels,energy,refinery"),
-    (["газ","lng","газопровод"], "natural gas,energy,pipeline"),
-    (["рубл","ruble","руб"], "ruble,currency,money"),
-    (["доллар","usd","dxy","usdt"], "dollar,currency,finance,wall street"),
-    (["биткоин","bitcoin","btc","крипт","crypto","ether","eth"], "crypto,blockchain,bitcoin,ethereum"),
-    (["акци","индекс","s&p","nasdaq","рынок","биржа"], "stocks,stock market,ticker,wall street"),
-    (["евро","eur"], "euro,currency,finance"),
-    (["золото","gold","xau"], "gold,precious metal,ingots"),
+# ---------- ВЫДЕЛЕНИЕ КЛЮЧЕВОЙ ПЕРСОНЫ/ПРЕДМЕТА ДЛЯ ФОНА ----------
+COMPANY_HINTS = [
+    "Apple","Microsoft","Tesla","Meta","Google","Alphabet","Amazon","Nvidia","Samsung","Intel","Huawei",
+    "Газпром","Сбербанк","Яндекс","Роснефть","Лукойл","Норникель","Татнефть","Новатэк","ВТБ"
 ]
+TICKER_PAT = re.compile(r"\b[A-Z]{2,5}\b")  # USD, EUR, BTC, AAPL…
 
-def pick_photo_query(title, summary):
-    text = f"{title} {summary}".lower()
-    for keys, q in KEYMAP:
-        if any(k in text for k in keys):
-            return q
-    return "finance,markets,city night,news"
+def extract_entities(title, summary):
+    text = f"{title} {summary}".strip()
+    # 1) Пары/тройки заглавных слов (имена/фамилии/бренды)
+    cap_names = re.findall(r"(?:[A-ZА-ЯЁ][a-zа-яё]+(?:\s+[A-ZА-ЯЁ][a-zа-яё]+){0,2})", text)
+    # 2) Тикеры/коды валют
+    tickers = [m for m in TICKER_PAT.findall(text) if m not in ("NEWS","HTTP","HTTPS","HTML")]
+    # 3) Явные компании
+    companies = [c for c in COMPANY_HINTS if c.lower() in text.lower()]
+    # Удалим совсем общие слова
+    stop = {"The","This","That","Economy","Market","Index","Президент","Правительство","Россия","США"}
+    cap_names = [x for x in cap_names if x not in stop and len(x) > 2]
+    # Соберём приоритет: имена → компании → тикеры
+    out = []
+    out += cap_names[:3]
+    out += companies[:3]
+    out += tickers[:3]
+    # fallback
+    if not out:
+        out = ["finance", "market"]
+    return out
+
+def build_photo_query(entities):
+    # Если похоже на персону (две заглавные части) — портрет
+    if entities:
+        ent = entities[0]
+        if len(ent.split()) >= 2 and all(w and w[0].isupper() for w in ent.split()):
+            return f"portrait,{ent}"
+    # Иначе предмет/бренд
+    return ",".join(entities[:3])
 
 def get_background(title, summary, w=1080, h=540):
-    q = pick_photo_query(title, summary)
-    img = fetch_unsplash_image(q, w, h) or fetch_picsum_image(w, h) or gradient_fallback(w, h)
-    img = img.filter(ImageFilter.GaussianBlur(radius=0.6))
-    img = ImageEnhance.Brightness(img).enhance(0.85)
-    return img
+    entities = extract_entities(title, summary)
+    query = build_photo_query(entities)
+    img = fetch_unsplash_image(query, w, h) or fetch_picsum_image(w, h) or gradient_fallback(w, h)
+    img = img.filter(ImageFilter.GaussianBlur(radius=0.5))
+    img = ImageEnhance.Brightness(img).enhance(0.9)
+    return img, query
 
-# ---------- КАРТОЧКА 1080x540 ----------
-def draw_card_quote(title_text, summary_text, src_domain, tzname):
+# ---------- КАРТОЧКА 1080x540 (ТОЛЬКО ЗАГОЛОВОК) ----------
+def draw_card_title_only(title_text, src_domain, tzname, query_used):
     W, H = 1080, 540
-    bg = get_background(title_text, summary_text, W, H)
+    # для читаемости подложим лёгкую тень-плашку
+    bg, _ = get_background(title_text, "", W, H)
+    d = ImageDraw.Draw(bg)
 
-    # затемняем под текст
+    # затемняем широкую центральную область
     overlay = Image.new("RGBA", (W, H), (0,0,0,0))
     od = ImageDraw.Draw(overlay)
-    od.rounded_rectangle([40, 90, W-40, H-70], radius=28, fill=(0,0,0,120))
+    od.rounded_rectangle([40, 110, W-40, H-90], radius=28, fill=(0,0,0,110))
     bg = Image.alpha_composite(bg.convert("RGBA"), overlay).convert("RGB")
     d = ImageDraw.Draw(bg)
 
     # Шрифты
-    font_brand     = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 34)
-    font_time      = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 26)
-    font_quote     = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 40)
-    font_title     = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 50)
-    font_small     = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 24)
-    font_quote_mark= ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 80)
+    font_brand  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 34)
+    font_time   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 26)
+    font_title  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 58)
+    font_small  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 22)
 
     # Верх: бренд + время
     brand = "USDT=Dollar"
@@ -167,29 +185,18 @@ def draw_card_quote(title_text, summary_text, src_domain, tzname):
     now_str = datetime.now(tz).strftime("%d.%m %H:%M")
     d.text((W - 48 - d.textlength(now_str, font=font_time), 26), now_str, fill=(255,255,255), font=font_time)
 
-    # Тело
+    # Заголовок (только он)
     margin_x = 72
-    y = 120
-    d.text((margin_x - 20, y - 20), "“", fill=(255,255,255), font=font_quote_mark)
+    y = 150
+    for line in textwrap.wrap((title_text or "").strip(), width=28)[:4]:
+        d.text((margin_x, y), line, font=font_title, fill=(255,255,255))
+        y += 66
 
-    for line in textwrap.wrap((title_text or "").strip(), width=28)[:3]:
-        d.text((margin_x + 50, y), line, font=font_title, fill=(255,255,255))
-        y += 58
-
-    short = clamp((summary_text or "").strip().replace("\n", " "), 380)
-    if short:
-        y += 12
-        for ln in textwrap.wrap(short, width=40):
-            if y + 42 > H - 100:
-                break
-            d.text((margin_x + 50, y), ln, font=font_quote, fill=(230,230,230))
-            y += 42
-
-    d.text((W - 110, H - 140), "”", fill=(255,255,255), font=font_quote_mark)
-
-    # Низ: источник
+    # Низ: источник + подсказка запроса (чтобы понять, что за фон подобрался)
     src = f"source: {src_domain}"
-    d.text((72, H - 56), src, font=font_small, fill=(220,220,220))
+    d.text((72, H - 58), src, font=font_small, fill=(225,225,225))
+    # можно тихо вывести query_used (закомментируй, если не нужно)
+    # d.text((W - 72 - d.textlength(query_used, font=font_small), H - 58), query_used, font=font_small, fill=(200,200,200))
 
     bio = io.BytesIO()
     bg.save(bio, format="PNG", optimize=True)
@@ -207,8 +214,8 @@ def send_photo(photo_bytes, caption):
     r.raise_for_status()
     return r.json()
 
-# ---------- ПОЛУЧЕНИЕ РАЗВЁРНУТОГО ТЕКСТА ИЗ СТАТЬИ ----------
-def fetch_article_text(url, max_chars=1600):
+# ---------- ТЕКСТ СО СТРАНИЦЫ ----------
+def fetch_article_text(url, max_chars=2000):
     try:
         r = requests.get(url, headers=UA, timeout=20)
         if r.status_code != 200:
@@ -219,9 +226,8 @@ def fetch_article_text(url, max_chars=1600):
         for p in ps:
             t = p.get_text(" ", strip=True)
             if not t: continue
-            if len(t) < 60:
-                continue
-            if any(x in t.lower() for x in ["javascript", "cookie", "подпишитесь", "реклама", "cookies"]):
+            if len(t) < 60: continue
+            if any(x in t.lower() for x in ["javascript","cookie","подпишитесь","реклама","cookies"]):
                 continue
             chunks.append(t)
             if sum(len(c) for c in chunks) > max_chars:
@@ -235,11 +241,10 @@ def fetch_article_text(url, max_chars=1600):
 def expanded_summary(feed_summary, article_text, limit=900):
     base = (article_text or "").strip() or (feed_summary or "").strip()
     sents = re.split(r"(?<=[.!?])\s+", base)
-    out = " ".join(sents[:4]).strip()
+    out = " ".join(sents[:5]).strip()
     return clamp(out, limit)
 
 # ---------- СТРАНА + ГОС.ЛИЦА ----------
-# (Название, ключевые слова, Wikidata QID)
 COUNTRIES = [
     ("Россия", ["россия","рф","москва","рубл","пути","россий"], "Q159"),
     ("США", ["сша","соединенные шт","washington","байден","доллар","фрс","белый дом"], "Q30"),
@@ -331,10 +336,10 @@ def collect_entries():
 
 def process_item(link, title, feed_summary):
     # развёрнутый текст из статьи
-    article_text = fetch_article_text(link, max_chars=1600)
+    article_text = fetch_article_text(link, max_chars=2000)
     long_summary = expanded_summary(feed_summary, article_text, limit=900)
 
-    # определяем страну по заголовку + тексту
+    # Контекст: страна и лидеры
     country_info = detect_country(f"{title} {feed_summary} {article_text}")
     ctx_lines = []
     if country_info:
@@ -343,12 +348,57 @@ def process_item(link, title, feed_summary):
         if hos: ctx_lines.append(f"👤 Глава государства: {hos}")
         if hog: ctx_lines.append(f"👤 Глава правительства: {hog}")
 
-    # подпись и картинка
+    # Подпись (подробно), картинка (только заголовок)
     cap  = make_caption(title, long_summary, link or "", ctx_lines=ctx_lines)
-    card = draw_card_quote(title, long_summary, domain(link or ""), TIMEZONE)
 
+    # Для фона постараемся взять ключевую персону/предмет
+    entities = extract_entities(title, long_summary)
+    query = build_photo_query(entities)
+    # перерисуем фон по query и наложим ТОЛЬКО заголовок
+    # (используем draw_card_title_only, который внутри также затемняет)
+    # Подменим фон: создадим вручную, чтобы точно учёлся новый query
+    bg_img = fetch_unsplash_image(query, 1080, 540) or fetch_picsum_image(1080, 540) or gradient_fallback(1080, 540)
+    bg_img = bg_img.filter(ImageFilter.GaussianBlur(radius=0.5))
+    bg_img = ImageEnhance.Brightness(bg_img).enhance(0.9)
+
+    # Нарисуем заголовок на этом фоне
+    def finalize_card(image):
+        W, H = 1080, 540
+        img = image.resize((W,H))
+        overlay = Image.new("RGBA", (W, H), (0,0,0,0))
+        od = ImageDraw.Draw(overlay)
+        od.rounded_rectangle([40, 110, W-40, H-90], radius=28, fill=(0,0,0,110))
+        img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+        d = ImageDraw.Draw(img)
+        font_brand  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 34)
+        font_time   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 26)
+        font_title  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 58)
+        font_small  = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 22)
+        brand = "USDT=Dollar"
+        d.text((48, 26), brand, fill=(255,255,255), font=font_brand)
+        try:
+            tz = ZoneInfo(TIMEZONE)
+        except Exception:
+            tz = ZoneInfo("UTC")
+        now_str = datetime.now(tz).strftime("%d.%m %H:%M")
+        d.text((W - 48 - d.textlength(now_str, font=font_time), 26), now_str, fill=(255,255,255), font=font_time)
+        # Заголовок
+        margin_x = 72
+        y = 150
+        for line in textwrap.wrap((title or "").strip(), width=28)[:4]:
+            d.text((margin_x, y), line, font=font_title, fill=(255,255,255))
+            y += 66
+        # Низ: домен
+        src = f"source: {domain(link or '')}"
+        d.text((72, H - 58), src, font=font_small, fill=(225,225,225))
+        bio = io.BytesIO()
+        img.save(bio, format="PNG", optimize=True)
+        bio.seek(0)
+        return bio
+
+    card = finalize_card(bg_img)
     resp = send_photo(card, cap)
-    print("Posted:", (title or "")[:80], "→", resp.get("ok", True))
+    print("Posted:", (title or "")[:80], "→", resp.get("ok", True), "| query:", query)
 
 def trim_posted(posted_set, keep_last=600):
     if len(posted_set) <= keep_last:
