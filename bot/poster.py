@@ -1,5 +1,5 @@
-import os, io, json, time, textwrap, pathlib, hashlib, urllib.parse, sys, random
-from datetime import datetime, timezone
+import os, io, json, time, textwrap, pathlib, hashlib, urllib.parse, sys, random, collections
+from datetime import datetime, timezone, timedelta
 from dateutil import parser as dtparse
 import feedparser, requests
 from bs4 import BeautifulSoup
@@ -7,9 +7,14 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 from zoneinfo import ZoneInfo
 
 # ============ НАСТРОЙКИ ============
-BOT_TOKEN  = os.environ.get("BOT_TOKEN")  # ОБЯЗАТЕЛЬНО через GitHub Secrets
-CHANNEL_ID = os.environ.get("CHANNEL_ID", "@usdtdollarm")  # твой канал по умолчанию
-TIMEZONE   = os.environ.get("TIMEZONE", "Europe/Zurich")   # твой часовой пояс
+BOT_TOKEN  = os.environ.get("BOT_TOKEN")                  # ОБЯЗАТЕЛЬНО через GitHub Secrets
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "@usdtdollarm") # твой канал по умолчанию
+TIMEZONE   = os.environ.get("TIMEZONE", "Europe/Zurich")  # твой часовой пояс
+
+# Сколько постить за один запуск (защита от спама)
+MAX_POSTS_PER_RUN = int(os.environ.get("MAX_POSTS_PER_RUN", "5"))
+# Лимит «свежести»: только новости не старше X минут (чтобы не выгребать архив)
+LOOKBACK_MINUTES  = int(os.environ.get("LOOKBACK_MINUTES", "90"))
 
 # Русские источники
 RSS_FEEDS = [
@@ -81,7 +86,6 @@ def pick_photo_query(title, summary):
 UA = {"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
 
 def fetch_unsplash_image(query, w=1080, h=540, retries=3):
-    # https://source.unsplash.com/{w}x{h}/?{query}&sig={seed}
     for i in range(retries):
         try:
             seed = random.randint(0, 10_000_000)
@@ -95,7 +99,6 @@ def fetch_unsplash_image(query, w=1080, h=540, retries=3):
     return None
 
 def fetch_picsum_image(w=1080, h=540):
-    # https://picsum.photos/{w}/{h}?random
     try:
         seed = random.randint(1, 10_000_000)
         url = f"https://picsum.photos/{w}/{h}?random={seed}"
@@ -107,15 +110,15 @@ def fetch_picsum_image(w=1080, h=540):
     return None
 
 def gradient_fallback(w=1080, h=540):
-    # Простой вертикальный градиент + лёгкое затемнение
     top = (24, 26, 28); bottom = (10, 12, 14)
     img = Image.new("RGB", (w, h))
+    draw = ImageDraw.Draw(img)
     for y in range(h):
         alpha = y / (h-1)
         r = int(top[0]*(1-alpha) + bottom[0]*alpha)
         g = int(top[1]*(1-alpha) + bottom[1]*alpha)
         b = int(top[2]*(1-alpha) + bottom[2]*alpha)
-        ImageDraw.Draw(img).line([(0,y),(w,y)], fill=(r,g,b))
+        draw.line([(0,y),(w,y)], fill=(r,g,b))
     return img
 
 def get_background(title, summary, w=1080, h=540):
@@ -125,7 +128,6 @@ def get_background(title, summary, w=1080, h=540):
         img = fetch_picsum_image(w, h)
     if img is None:
         img = gradient_fallback(w, h)
-    # немного блюра и затемнения для читабельности текста
     img = img.filter(ImageFilter.GaussianBlur(radius=0.6))
     img = ImageEnhance.Brightness(img).enhance(0.85)
     return img
@@ -204,30 +206,34 @@ def send_photo(photo_bytes, caption):
     r.raise_for_status()
     return r.json()
 
-# ===== ЛОГИКА: 1 самая свежая новость среди всех фидов =====
-def choose_freshest_entry():
-    freshest = None
-    freshest_dt = datetime(1970,1,1, tzinfo=timezone.utc)
-
+# ===== ЛОГИКА: несколько свежих новостей за запуск =====
+def collect_entries():
+    """Собираем все записи из фидов, возвращаем список словарей с нормализованным временем."""
+    items = []
     for feed_url in RSS_FEEDS:
         fp = feedparser.parse(feed_url)
-        if not fp.entries:
-            continue
-
-        def parse_dt(e):
+        for e in fp.entries or []:
+            link = getattr(e, "link", "") or ""
+            title = (getattr(e, "title", "") or "").strip()
+            summary = clean_html(getattr(e, "summary", getattr(e, "description", "")))
             ts = getattr(e, "published", getattr(e, "updated", "")) or ""
             try:
-                return dtparse.parse(ts)
+                dt = dtparse.parse(ts)
+                if not dt.tzinfo:
+                    dt = dt.replace(tzinfo=timezone.utc)
             except Exception:
-                return datetime(1970,1,1, tzinfo=timezone.utc)
-
-        e = sorted(fp.entries, key=parse_dt, reverse=True)[0]
-        edt = parse_dt(e)
-        if edt > freshest_dt:
-            freshest_dt = edt
-            freshest = (feed_url, e)
-
-    return freshest
+                dt = datetime(1970,1,1, tzinfo=timezone.utc)
+            uid = hashlib.sha256((link + "|" + title + "|" + ts).encode("utf-8")).hexdigest()
+            items.append({
+                "feed": feed_url,
+                "link": link,
+                "title": title or "(no title)",
+                "summary": summary,
+                "ts": ts,
+                "dt": dt,
+                "uid": uid,
+            })
+    return items
 
 def process_item(link, title, summary):
     cap  = make_caption(title, summary, link or "")
@@ -235,33 +241,49 @@ def process_item(link, title, summary):
     resp = send_photo(card, cap)
     print("Posted:", (title or "")[:80], "→", resp.get("ok", True))
 
+def trim_posted(posted_set, keep_last=500):
+    """Ограничиваем размер множества сохранённых uid, чтобы state.json не пухнул."""
+    if len(posted_set) <= keep_last:
+        return posted_set
+    # просто обрежем до keep_last произвольно — не критично хранить порядок
+    return set(list(posted_set)[-keep_last:])
+
 def main():
     state = load_state()
-    last_uid = state.get("last_uid", "")
+    posted = set(state.get("posted_uids", []))
 
-    chosen = choose_freshest_entry()
-    if not chosen:
-        print("No entries found in feeds.")
+    # Собираем всё и оставляем только «свежак»
+    items = collect_entries()
+    if not items:
+        print("No entries found.")
         return
 
-    feed_url, entry = chosen
-    link    = getattr(entry, "link", "") or ""
-    title   = (getattr(entry, "title", "") or "").strip() or "(no title)"
-    summary = clean_html(getattr(entry, "summary", getattr(entry, "description", "")))
+    now = datetime.now(timezone.utc)
+    lookback_dt = now - timedelta(minutes=LOOKBACK_MINUTES)
+    fresh = [it for it in items if it["dt"] >= lookback_dt and it["uid"] not in posted]
 
-    ts = getattr(entry, "published", getattr(entry, "updated", "")) or ""
-    entry_uid = hashlib.sha256((link + "|" + title + "|" + ts).encode("utf-8")).hexdigest()
+    # Сортируем по времени (свежие сверху)
+    fresh.sort(key=lambda x: x["dt"], reverse=True)
 
-    if entry_uid == last_uid:
-        print("Freshest item already posted, skip.")
+    # Берём верхние N
+    to_post = fresh[:MAX_POSTS_PER_RUN]
+
+    if not to_post:
+        print("Nothing new to post within lookback window.")
         return
 
-    try:
-        process_item(link, title, summary)
-        state["last_uid"] = entry_uid
-        save_state(state)
-    except Exception as e:
-        print("Error sending:", e)
+    # Публикуем с маленькой паузой
+    for it in to_post:
+        try:
+            process_item(it["link"], it["title"], it["summary"])
+            posted.add(it["uid"])
+            time.sleep(1.0)  # маленькая пауза, чтобы не попасть на rate limit
+        except Exception as e:
+            print("Error sending:", e)
+
+    # Сохраняем состояние
+    state["posted_uids"] = list(trim_posted(posted))
+    save_state(state)
 
 if __name__ == "__main__":
     main()
