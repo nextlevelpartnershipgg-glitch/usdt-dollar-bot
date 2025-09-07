@@ -11,8 +11,7 @@ BOT_TOKEN  = os.environ["BOT_TOKEN"]
 CHANNEL_ID = os.environ["CHANNEL_ID"]  # пример: @USDT_Dollar
 
 # Белый список RSS-источников (можешь менять/добавлять)
-RSS_FEEDS = [
-    # Белый список RSS-источников (RU-медиа)
+
 RSS_FEEDS = [
     # РБК (главные новости)
     "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
