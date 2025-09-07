@@ -72,7 +72,7 @@ def sentiment(text):
 # --- карточка 1080x540 ---
 def draw_card(title_text, src_domain, summary_text=""):
     BRAND = "USDT=Dollar"
-    W, H = 600, 600
+    W, H = 1920, 1980 
 
     tone = sentiment(f"{title_text} {summary_text}")
     if tone == "pos":
