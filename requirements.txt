@@ -1,0 +1,5 @@
+feedparser
+requests
+python-dateutil
+Pillow
+beautifulsoup4
