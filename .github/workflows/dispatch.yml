@@ -1,0 +1,37 @@
+name: USDT=Dollar Auto Poster (dispatch)
+
+on:
+  repository_dispatch:
+    types: [usdt_news]
+
+permissions:
+  contents: write
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run poster (single item from payload)
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          TIMEZONE: ${{ vars.TIMEZONE }}
+          USDT_TITLE: ${{ github.event.client_payload.title }}
+          USDT_LINK:  ${{ github.event.client_payload.link }}
+          USDT_SUM:   ${{ github.event.client_payload.summary }}
+          USDT_SRC:   ${{ github.event.client_payload.source }}
+        run: |
+          python bot/poster.py --single
