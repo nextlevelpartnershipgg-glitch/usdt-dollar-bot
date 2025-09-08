@@ -18,21 +18,68 @@ CHANNEL_LINK   = os.environ.get("CHANNEL_LINK", f"https://t.me/{CHANNEL_HANDLE.l
 MAX_POSTS_PER_RUN = int(os.environ.get("MAX_POSTS_PER_RUN", "5"))
 LOOKBACK_MINUTES  = int(os.environ.get("LOOKBACK_MINUTES", "90"))
 
-RSS_FEEDS = [
-    # RU
+# ========= ИСТОЧНИКИ =========
+RSS_FEEDS_RU = [
+    # РБК
     "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
-    "https://www.kommersant.ru/RSS/news.xml",
+    "https://rssexport.rbc.ru/rbcnews/economics/30/full.rss",
+    "https://rssexport.rbc.ru/rbcnews/finance/30/full.rss",
+    "https://rssexport.rbc.ru/rbcnews/politics/30/full.rss",
+    # Lenta
     "https://lenta.ru/rss/news",
+    "https://lenta.ru/rss/economics",
+    "https://lenta.ru/rss/russia",
+    "https://lenta.ru/rss/world",
+    # Коммерсантъ
+    "https://www.kommersant.ru/RSS/news.xml",
+    "https://www.kommersant.ru/RSS/economics.xml",
+    "https://www.kommersant.ru/RSS/finance.xml",
+    # Газета.ru
+    "https://www.gazeta.ru/export/rss/first.xml",
+    "https://www.gazeta.ru/export/rss/business.xml",
+    "https://www.gazeta.ru/export/rss/politics.xml",
+    # ТАСС / Ведомости / Интерфакс / РИА / Известия / Финмаркет
     "https://tass.ru/rss/v2.xml",
-    # World
+    "https://www.vedomosti.ru/rss/news",
+    "https://www.interfax.ru/rss.asp",
+    "https://ria.ru/export/rss2/archive/index.xml",
+    "https://iz.ru/xml/rss/all.xml",
+    "https://www.finmarket.ru/rss/news.asp",
+    # Профильные
+    "https://banki.ru/xml/news.rss",
+    "https://www.kommersant.ru/RSS/regions.xml",
+    "https://www.kommersant.ru/RSS/tech.xml",
+]
+
+RSS_FEEDS_WORLD = [
+    # Reuters
     "https://feeds.reuters.com/reuters/businessNews",
+    "https://feeds.reuters.com/Reuters/worldNews",
+    "https://feeds.reuters.com/reuters/marketsNews",
+    # Bloomberg / FT / WSJ / BBC / CNN / CNBC / Guardian / NYT / MW
+    "https://feeds.bloomberg.com/politics/news.rss",
     "https://www.bloomberg.com/feeds/podcasts/etf_report.xml",
     "https://www.ft.com/?format=rss",
-    # Crypto
+    "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
+    "https://feeds.a.dj.com/rss/RSSWorldNews.xml",
+    "http://feeds.bbci.co.uk/news/world/rss.xml",
+    "http://feeds.bbci.co.uk/news/business/rss.xml",
+    "http://rss.cnn.com/rss/edition_world.rss",
+    "https://www.cnbc.com/id/100003114/device/rss/rss.html",
+    "https://www.theguardian.com/world/rss",
+    "https://www.theguardian.com/uk/business/rss",
+    "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
+    "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
+    "https://www.marketwatch.com/rss/topstories",
+    "https://www.aljazeera.com/xml/rss/all.xml",
+    "https://asia.nikkei.com/rss",
+    "https://www.scmp.com/rss/91/feed",
+    # Крипта (международные)
     "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml",
     "https://cointelegraph.com/rss",
-    "https://forklog.com/news/feed",
 ]
+
+RSS_FEEDS = RSS_FEEDS_RU + RSS_FEEDS_WORLD
 
 DATA_DIR = pathlib.Path("data"); DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
@@ -40,7 +87,14 @@ STATE_FILE = DATA_DIR / "state.json"
 UA  = {"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
 UA_IMG = {"User-Agent":"Mozilla/5.0"}
 
-# ========= УТИЛИТЫ =========
+# ========= PYMORPHY2 (для лемматизации тегов) =========
+try:
+    import pymorphy2
+    MORPH = pymorphy2.MorphAnalyzer()
+except Exception:
+    MORPH = None  # будет фолбэк
+
+# ========= ВСПОМОГАТЕЛЬНЫЕ =========
 def load_state():
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -74,7 +128,6 @@ def clamp(s, n):
 
 # ========= ЯЗЫК / ПЕРЕВОД =========
 def detect_lang(text: str) -> str:
-    """Очень простое определение: кириллица -> ru; много английских стоп-слов -> en."""
     if re.search(r"[А-Яа-яЁё]", text):
         return "ru"
     en_hits = len(re.findall(r"\b(the|and|of|to|in|for|on|with|from|by|as|at|is|are)\b", text.lower()))
@@ -87,7 +140,6 @@ LT_ENDPOINTS = [
 ]
 
 LOCAL_EN_RU = {
-    # грубый фолбэк: только базовые финтермины, если онлайн-перевод недоступен
     "fed": "ФРС", "ecb":"ЕЦБ", "bank of england":"Банк Англии", "bank of japan":"Банк Японии",
     "inflation":"инфляция", "cpi":"индекс CPI", "ppi":"индекс PPI",
     "rate":"ставка", "rates":"ставки", "hike":"повышение", "cut":"снижение",
@@ -102,7 +154,6 @@ def translate_en_to_ru(text: str, timeout=12) -> str:
     text = text.strip()
     if not text:
         return text
-    # пробуем LibreTranslate (несколько публичных узлов)
     for ep in LT_ENDPOINTS:
         try:
             r = requests.post(ep, data={"q": text, "source":"en", "target":"ru", "format":"text"},
@@ -114,12 +165,10 @@ def translate_en_to_ru(text: str, timeout=12) -> str:
                     return out.strip()
         except Exception:
             continue
-    # очень простой локальный фолбэк: «машинная подмена» слов + сохранение структуры
     s = text
-    # замена многословных выражений сначала
     for k in sorted(LOCAL_EN_RU.keys(), key=lambda x: -len(x)):
         s = re.sub(rf"\b{re.escape(k)}\b", LOCAL_EN_RU[k], s, flags=re.IGNORECASE)
-    return s  # может содержать английский, но ключевые термины русифицированы
+    return s
 
 # ========= ФОН (персона/предмет) =========
 COMPANY_HINTS = [
@@ -133,7 +182,7 @@ def extract_entities(title, summary):
     names = re.findall(r"(?:[A-ZА-ЯЁ][a-zа-яё]+(?:\s+[A-ZА-ЯЁ][a-zа-яё]+){0,2})", text)
     tickers = [m for m in TICKER_PAT.findall(text) if m not in ("NEWS","HTTP","HTTPS","HTML")]
     companies = [c for c in COMPANY_HINTS if c.lower() in text.lower()]
-    stop = {"The","This","Президент","Правительство","Россия","США","Луна"}
+    stop = {"The","This"}
     names = [x for x in names if x not in stop and len(x) > 2]
     out = []
     out += names[:3]; out += companies[:3]; out += tickers[:3]
@@ -273,16 +322,13 @@ def fetch_article_text(url, max_chars=2600):
     except Exception:
         return ""
 
-# ========= «Научный» стиль (RU) =========
+# ========= «Научный» стиль RU =========
 RU_TONE_REWRITE = [
     (r"\bсказал(а|и)?\b", "сообщил\\1"),
     (r"\bзаявил(а|и)?\b", "отметил\\1"),
     (r"\bпо словам\b", "по данным"),
     (r"\bпо мнению\b", "согласно оценкам"),
-    (r"\bочевидно\b", "следует отметить"),
-    (r"\bнаверное\b", "вероятно"),
     (r"\bпримерно\b", "порядка"),
-    (r"\bв том числе\b", "включая"),
     (r"\bочень\b", "существенно"),
     (r"\bсильно\b", "значительно"),
 ]
@@ -291,9 +337,7 @@ def ru_scientific_paraphrase(s):
     out = s
     for pat, repl in RU_TONE_REWRITE:
         out = re.sub(pat, repl, out, flags=re.IGNORECASE)
-    # нормализуем числа и проценты (10 % -> 10%)
     out = re.sub(r"\s+%", "%", out)
-    # убираем лишние пробелы
     out = re.sub(r"\s+", " ", out).strip()
     return out
 
@@ -303,7 +347,6 @@ def split_sentences(text):
     return re.split(r"(?<=[.!?])\s+", text)
 
 def paraphrase_sentence_ru_or_en(s):
-    # Если английский — сначала переводим, затем стилевой рерайт
     lang = detect_lang(s)
     if lang == "en":
         s = translate_en_to_ru(s)
@@ -321,23 +364,17 @@ def one_context_emoji(context):
     return "📰"
 
 def build_three_paragraphs_scientific(title, article_text, feed_summary):
-    """3 абзаца: факт -> детали -> контекст/последствия; EN переводится в RU заранее."""
     base = (article_text or "").strip() or (feed_summary or "").strip()
-    # если основа англоязычная — переведём сразу массивом (меньше запросов)
     if detect_lang(base) == "en":
         base = translate_en_to_ru(base)
     sents = [s for s in split_sentences(base) if s]
 
-    # А1 — факт (1–2 предложения)
     p1_src = sents[:2] or sents[:1]
-    p1 = " ".join(paraphrase_sentence_ru_or_en(s) for s in p1_src)
-
-    # А2 — детали/цифры (2–3 предложения)
     p2_src = sents[2:5] or sents[:1]
-    p2 = " ".join(paraphrase_sentence_ru_or_en(s) for s in p2_src)
-
-    # А3 — последствия/контекст (до 3 предложений) — берём следующие фразы
     p3_src = sents[5:8] or sents[1:3] or sents[:1]
+
+    p1 = " ".join(paraphrase_sentence_ru_or_en(s) for s in p1_src)
+    p2 = " ".join(paraphrase_sentence_ru_or_en(s) for s in p2_src)
     p3 = " ".join(paraphrase_sentence_ru_or_en(s) for s in p3_src)
 
     emoji = one_context_emoji(f"{title} {base}")
@@ -346,47 +383,113 @@ def build_three_paragraphs_scientific(title, article_text, feed_summary):
     p3 = clamp(p3, 360)
     return p1, p2, p3
 
-# ========= ТЕГИ =========
-def gen_smart_tags(title, text, entities, max_tags=6):
-    t = f"{title} {text}".lower()
-    tags = []
-    def add(x):
-        if x not in tags:
-            tags.append(x)
+# ========= ТЕГИ (существительные, И.п.) =========
+RU_STOP = set("""
+это тот эта которые который которой которых таком таком-то также поэтому таким чтобы при про для на из от по как уже еще или либо либо-же чем чем-то если когда где куда всего весь все вся того той его ее их наш ваш свой мой твой один две три четыре пять шесть семь восемь девять ноль
+""".split())
 
-    if any(k in t for k in ["биткоин","bitcoin","btc","эфириум","ethereum","eth","крипт","stablecoin","usdt","usdc","solana","sol"]):
-        add("#крипта"); 
-        if "btc" in t or "биткоин" in t: add("#BTC")
-        if "eth" in t or "эфириум" in t: add("#ETH")
+COUNTRY_PROPER = {
+    "россия":"Россия","сша":"США","китай":"Китай","япония":"Япония","германия":"Германия","франция":"Франция",
+    "великобритания":"Великобритания","индия":"Индия","россий":"Россия","европа":"Европа"
+}
 
-    if any(k in t for k in ["доллар","usd","евро","eur","рубл","rub","юань","cny","курс","форекс","fx"]):
-        add("#валюта")
-        if any(k in t for k in ["usd","доллар"]): add("#USD")
-        if any(k in t for k in ["eur","евро"]): add("#EUR")
-        if any(k in t for k in ["рубл","rub"]): add("#RUB")
-        if any(k in t for k in ["cny","юань","yuan"]): add("#CNY")
+def lemma_noun(word):
+    w = word.lower()
+    if MORPH:
+        p = MORPH.parse(w)[0]
+        if 'NOUN' in p.tag:
+            nf = p.normal_form
+            # собственные имена/страны — с заглавной
+            if nf in COUNTRY_PROPER:
+                return COUNTRY_PROPER[nf]
+            # иначе маленькими (в тегах принято)
+            return nf
+    # фолбэк: вернем как есть
+    return w
 
-    if any(k in t for k in ["акци","рынок","бирж","индекс","nasdaq","nyse","s&p","sp500","dow","мосбирж"]):
-        add("#акции"); add("#рынки")
+def extract_candidate_nouns(text, entities, limit=10):
+    # базовый сбор: слова кириллицей/латиницей + сущности/тикеры
+    words = re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", text)
+    candidates = []
+    for w in words:
+        wl = w.lower()
+        if wl in RU_STOP: 
+            continue
+        # отфильтруем служебные
+        if re.fullmatch(r"[A-Za-z]{3,}", wl) and wl in {"the","and","for","with","from","that"}:
+            continue
+        candidates.append(wl)
 
-    if any(k in t for k in ["ставк","фрс","цб","центробанк","инфляц","cpi","ppi","qe","qt"]):
-        add("#ставки"); add("#инфляция")
-
-    if any(k in t for k in ["нефть","брент","wti","opec","газ","энерги","lng"]):
-        add("#энергетика"); 
-        if "брент" in t or "brent" in t: add("#Brent")
-        if "wti" in t: add("#WTI")
-        if "газ" in t: add("#газ")
-
-    if any(k in t for k in ["санкц","эмбарго","пошлин","геополит","переговор","президент"]):
-        add("#геополитика")
-
-    for e in entities[:3]:
-        if re.fullmatch(r"[A-Z]{2,6}", e): add(f"#{e}")
+    # плюс сущности
+    for e in entities:
+        if re.fullmatch(r"[A-Z]{2,6}", e):
+            candidates.append(e)  # тикер
         else:
-            name = re.sub(r"[^A-Za-zА-Яа-я0-9]+", "", e)
-            if 2 < len(name) <= 20: add(f"#{name}")
+            candidates += e.split()
 
+    # к леммам
+    lemmas = []
+    for c in candidates:
+        if re.fullmatch(r"[A-Z]{2,6}", c):
+            lemmas.append(c)  # тикер без изменений
+        else:
+            l = lemma_noun(c)
+            if l and len(l) >= 3:
+                lemmas.append(l)
+    # частотная сортировка
+    freq = {}
+    for l in lemmas:
+        freq[l] = freq.get(l, 0) + 1
+    out = [k for k,_ in sorted(freq.items(), key=lambda x: -x[1])]
+    # финальный фильтр: только буквы/цифры
+    out = [re.sub(r"[^A-Za-zА-Яа-яЁё0-9]", "", x) for x in out]
+    out = [x for x in out if x and x.lower() not in RU_STOP]
+    return out[:limit]
+
+def gen_tags_nominative(title, body, entities, max_tags=6):
+    # базовые тематики (в виде нормальной формы)
+    thematic = []
+    text_l = (title + " " + body).lower()
+    def tadd(x):
+        if x not in thematic:
+            thematic.append(x)
+
+    if any(k in text_l for k in ["биткоин","bitcoin","btc","крипт","ethereum","eth","stablecoin"]): tadd("крипта")
+    if any(k in text_l for k in ["доллар","usd","евро","eur","рубл","rub","юань","cny","курс","форекс"]): tadd("валюта")
+    if any(k in text_l for k in ["акци","рынок","бирж","индекс","nasdaq","nyse","s&p","sp500","dow"]): tadd("рынки")
+    if any(k in text_l for k in ["ставк","фрс","цб","инфляц","cpi","ppi","qe","qt"]): tadd("ставки")
+    if any(k in text_l for k in ["нефть","брент","wti","opec","газ","энерги","lng"]): tadd("энергетика")
+    if any(k in text_l for k in ["санкц","эмбарго","пошлин","геополит","переговор","президент"]): tadd("геополитика")
+
+    # кандидаты-существительные
+    nouns = extract_candidate_nouns(title + " " + body, entities, limit=12)
+
+    # собираем финальные (сначала тематические, потом частотные)
+    result = []
+    def add_tag(s):
+        if s and s not in result and len(result) < max_tags:
+            result.append(s)
+
+    for t in thematic:
+        add_tag(t)
+
+    for n in nouns:
+        # нормализуем заглавные для стран
+        cap = COUNTRY_PROPER.get(n.lower(), n)
+        add_tag(cap)
+
+    # тикеры (#BTC) уже могут попасть как кандидаты — оставим их как есть
+    tags = []
+    for t in result[:max_tags]:
+        if re.fullmatch(r"[A-Z]{2,6}", t):
+            tags.append("#" + t)
+        else:
+            # делаем хэштег в именительном падеже
+            # страны и имена — с заглавной, прочие — строчные
+            if t in COUNTRY_PROPER.values():
+                tags.append("#" + t)
+            else:
+                tags.append("#" + t.lower())
     return " ".join(tags[:max_tags])
 
 # ========= КАПШЕН =========
@@ -409,25 +512,22 @@ def build_caption(title, para1, para2, para3, link, tags_str):
         over = len(cap) - 1024 + 3
         p3 = clamp(para3[:-min(over, len(para3))], 300)
         parts = [title, "", f"{para1}\n\n{para2}\n\n{p3}"]
-        if dom: parts += ["", f"Источник: [{dom}]({link})"]
-        else:   parts += ["", "Источник: неизвестно"]
-        parts += ["", f"[{CHANNEL_NAME}]({CHANNEL_LINK})", "", tags_str]
+        parts += ["", f"Источник: [{dom}]({link})" if dom else "Источник: неизвестно",
+                  "", f"[{CHANNEL_NAME}]({CHANNEL_LINK})", "", tags_str]
         cap = "\n".join(parts)
         if len(cap) > 1024:
             over = len(cap) - 1024 + 3
             p2 = clamp(para2[:-min(over, len(para2))], 300)
             parts = [title, "", f"{para1}\n\n{p2}\n\n{p3}"]
-            if dom: parts += ["", f"Источник: [{dom}]({link})"]
-            else:   parts += ["", "Источник: неизвестно"]
-            parts += ["", f"[{CHANNEL_NAME}]({CHANNEL_LINK})", "", tags_str]
+            parts += ["", f"Источник: [{dom}]({link})" if dom else "Источник: неизвестно",
+                      "", f"[{CHANNEL_NAME}]({CHANNEL_LINK})", "", tags_str]
             cap = "\n".join(parts)
             if len(cap) > 1024:
                 over = len(cap) - 1024 + 3
                 p1 = clamp(para1[:-min(over, len(para1))], 280)
                 parts = [title, "", f"{p1}\n\n{p2}\n\n{p3}"]
-                if dom: parts += ["", f"Источник: [{dom}]({link})"]
-                else:   parts += ["", "Источник: неизвестно"]
-                parts += ["", f"[{CHANNEL_NAME}]({CHANNEL_LINK})", "", tags_str]
+                parts += ["", f"Источник: [{dom}]({link})" if dom else "Источник: неизвестно",
+                          "", f"[{CHANNEL_NAME}]({CHANNEL_LINK})", "", tags_str]
                 cap = "\n".join(parts)
     return cap
 
@@ -467,15 +567,33 @@ def collect_entries():
                           "summary": summary, "ts": ts, "dt": dt, "uid": uid})
     return items
 
-# ========= ОБРАБОТКА =========
+# ========= ОБРАБОТКА ОДНОЙ НОВОСТИ =========
+def build_three_paragraphs_scientific(title, article_text, feed_summary):
+    base = (article_text or "").strip() or (feed_summary or "").strip()
+    if detect_lang(base) == "en":
+        base = translate_en_to_ru(base)
+    sents = [s for s in split_sentences(base) if s]
+
+    p1_src = sents[:2] or sents[:1]
+    p2_src = sents[2:5] or sents[:1]
+    p3_src = sents[5:8] or sents[1:3] or sents[:1]
+
+    p1 = " ".join(paraphrase_sentence_ru_or_en(s) for s in p1_src)
+    p2 = " ".join(paraphrase_sentence_ru_or_en(s) for s in p2_src)
+    p3 = " ".join(paraphrase_sentence_ru_or_en(s) for s in p3_src)
+
+    emoji = one_context_emoji(f"{title} {base}")
+    p1 = f"{emoji} {clamp(p1, 320)}"
+    p2 = clamp(p2, 360)
+    p3 = clamp(p3, 360)
+    return p1, p2, p3
+
 def process_item(link, title, feed_summary):
     article_text = fetch_article_text(link, max_chars=2600)
-
-    # «Научный» рерайт с автопереводом EN→RU при необходимости
     p1, p2, p3 = build_three_paragraphs_scientific(title, article_text, feed_summary)
 
     entities = extract_entities(title, f"{p1} {p2} {p3}")
-    tags_str = gen_smart_tags(title, f"{p1} {p2} {p3}", entities, max_tags=6) or "#новости"
+    tags_str = gen_tags_nominative(title, f"{p1} {p2} {p3}", entities, max_tags=6) or "#новости"
 
     caption = build_caption(title, p1, p2, p3, link or "", tags_str)
     card = draw_title_card(title, domain(link or ""), TIMEZONE)
