@@ -7,14 +7,16 @@ BOT_TOKEN  = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "@usdtdollarm")
 TIMEZONE   = os.environ.get("TIMEZONE", "Europe/Moscow")
 
-DATA_DIR = pathlib.Path("data")
+DATA_DIR = pathlib.Path("data"); DATA_DIR.mkdir(parents=True, exist_ok=True)
 HISTORY_FILE = DATA_DIR / "history.json"
-STATE_FILE   = DATA_DIR / "digest_state.json"   # чтобы не повторять один и тот же период
+STATE_FILE   = DATA_DIR / "digest_state.json"
 
 def load_json(p, default):
     if p.exists():
-        try: return json.loads(p.read_text(encoding="utf-8"))
-        except Exception: return default
+        try:
+            return json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            return default
     return default
 
 def save_json(p, data):
@@ -31,17 +33,15 @@ def main():
     now_utc = datetime.now(timezone.utc)
     tz = ZoneInfo(TIMEZONE)
 
-    # окно 8 часов
     window_start = now_utc - timedelta(hours=8)
 
-    # не повторять дайджест если уже делали позднее этого старта
     last = state.get("last_digest_utc")
     if last:
         last_dt = datetime.fromisoformat(last)
         if last_dt >= window_start:
-            print("Digest already done for this window."); return
+            print("Digest already done for this window.")
+            return
 
-    # выбираем записи из истории
     items = []
     for it in hist:
         try:
@@ -52,14 +52,14 @@ def main():
             continue
 
     if not items:
-        print("No items for digest."); 
-        state["last_digest_utc"]=now_utc.isoformat(); save_json(STATE_FILE, state); 
+        print("No items for digest.")
+        state["last_digest_utc"]=now_utc.isoformat(); save_json(STATE_FILE, state)
         return
 
-    # собираем текст
     items.sort(key=lambda x: x["posted_utc"], reverse=True)
+
     lines = ["*Дайджест за 8 часов*"]
-    for it in items[:18]:   # чтобы не упереться в лимит
+    for it in items[:18]:
         ev = datetime.fromisoformat(it["event_utc"]).astimezone(tz).strftime("%d.%m %H:%M")
         title = it["title"]
         link = it["link"]
@@ -67,8 +67,9 @@ def main():
 
     lines.append("")
     lines.append("🪙 [USDT=Dollar](https://t.me/usdtdollarm)")
+
     text = "\n".join(lines)
-    if len(text) > 4000:  # подстрахуемся
+    if len(text) > 4000:
         text = text[:3996] + "…"
 
     send_message(text)
