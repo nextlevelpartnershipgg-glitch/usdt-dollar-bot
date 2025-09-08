@@ -72,6 +72,55 @@ def clamp(s, n):
     s = (s or "").strip()
     return s if len(s) <= n else s[:n-1] + "…"
 
+# ========= ЯЗЫК / ПЕРЕВОД =========
+def detect_lang(text: str) -> str:
+    """Очень простое определение: кириллица -> ru; много английских стоп-слов -> en."""
+    if re.search(r"[А-Яа-яЁё]", text):
+        return "ru"
+    en_hits = len(re.findall(r"\b(the|and|of|to|in|for|on|with|from|by|as|at|is|are)\b", text.lower()))
+    ru_hits = len(re.findall(r"\b(и|в|на|по|для|из|от|как|это|что|бы|не|к)\b", text.lower()))
+    return "en" if en_hits > ru_hits else "ru"
+
+LT_ENDPOINTS = [
+    "https://libretranslate.de/translate",
+    "https://translate.argosopentech.com/translate",
+]
+
+LOCAL_EN_RU = {
+    # грубый фолбэк: только базовые финтермины, если онлайн-перевод недоступен
+    "fed": "ФРС", "ecb":"ЕЦБ", "bank of england":"Банк Англии", "bank of japan":"Банк Японии",
+    "inflation":"инфляция", "cpi":"индекс CPI", "ppi":"индекс PPI",
+    "rate":"ставка", "rates":"ставки", "hike":"повышение", "cut":"снижение",
+    "recession":"рецессия", "growth":"рост", "gdp":"ВВП",
+    "oil":"нефть", "gas":"газ", "brent":"Brent", "wti":"WTI",
+    "stocks":"акции", "bonds":"облигации", "equities":"акции", "yields":"доходности",
+    "dollar":"доллар", "euro":"евро", "ruble":"рубль", "yuan":"юань",
+    "bitcoin":"биткоин", "ethereum":"эфириум", "crypto":"криптовалюта",
+}
+
+def translate_en_to_ru(text: str, timeout=12) -> str:
+    text = text.strip()
+    if not text:
+        return text
+    # пробуем LibreTranslate (несколько публичных узлов)
+    for ep in LT_ENDPOINTS:
+        try:
+            r = requests.post(ep, data={"q": text, "source":"en", "target":"ru", "format":"text"},
+                              headers={"Accept":"application/json"}, timeout=timeout)
+            if r.status_code == 200:
+                data = r.json()
+                out = data.get("translatedText") or ""
+                if out.strip():
+                    return out.strip()
+        except Exception:
+            continue
+    # очень простой локальный фолбэк: «машинная подмена» слов + сохранение структуры
+    s = text
+    # замена многословных выражений сначала
+    for k in sorted(LOCAL_EN_RU.keys(), key=lambda x: -len(x)):
+        s = re.sub(rf"\b{re.escape(k)}\b", LOCAL_EN_RU[k], s, flags=re.IGNORECASE)
+    return s  # может содержать английский, но ключевые термины русифицированы
+
 # ========= ФОН (персона/предмет) =========
 COMPANY_HINTS = [
     "Apple","Microsoft","Tesla","Meta","Google","Alphabet","Amazon","Nvidia","Samsung","Intel","Huawei",
@@ -136,11 +185,10 @@ def get_background(title, summary, w=1080, h=540):
     img = ImageEnhance.Brightness(img).enhance(0.9)
     return img
 
-# ========= КАРТОЧКА: перенос по словам, без «…» =========
+# ========= КАРТОЧКА: перенос по словам =========
 def wrap_text_by_width(draw, text, font, max_width, max_lines=5):
     words = text.split()
-    lines = []
-    current = ""
+    lines, current = [], ""
     for w in words:
         test = (current + " " + w).strip()
         if draw.textlength(test, font=font) <= max_width:
@@ -159,12 +207,10 @@ def fit_title_in_box(draw, text, font_path, box_w, box_h, start_size=64, min_siz
     for size in range(start_size, min_size-1, -2):
         font = ImageFont.truetype(font_path, size)
         lines = wrap_text_by_width(draw, text, font, box_w, max_lines=max_lines)
-        # вычислим высоту
         h_line = font.getbbox("Ag")[3]
         total_h = len(lines)*h_line + (len(lines)-1)*line_gap
         if lines and total_h <= box_h:
             return font, lines
-    # крайний случай — минимальный
     font = ImageFont.truetype(font_path, min_size)
     lines = wrap_text_by_width(draw, text, font, box_w, max_lines=max_lines)
     return font, lines
@@ -172,7 +218,6 @@ def fit_title_in_box(draw, text, font_path, box_w, box_h, start_size=64, min_siz
 def draw_title_card(title_text, src_domain, tzname):
     W, H = 1080, 540
     bg = get_background(title_text, "", W, H)
-
     overlay = Image.new("RGBA", (W, H), (0,0,0,0))
     od = ImageDraw.Draw(overlay)
     od.rounded_rectangle([40, 110, W-40, H-90], radius=28, fill=(0,0,0,110))
@@ -201,14 +246,11 @@ def draw_title_card(title_text, src_domain, tzname):
         y += font_title.getbbox("Ag")[3] + 8
 
     d.text((72, H - 58), f"source: {src_domain}", font=font_small, fill=(225,225,225))
-
-    bio = io.BytesIO()
-    bg.save(bio, format="PNG", optimize=True)
-    bio.seek(0)
+    bio = io.BytesIO(); bg.save(bio, format="PNG", optimize=True); bio.seek(0)
     return bio
 
 # ========= СТАТЬЯ =========
-def fetch_article_text(url, max_chars=2400):
+def fetch_article_text(url, max_chars=2600):
     try:
         r = requests.get(url, headers=UA, timeout=20)
         if r.status_code != 200:
@@ -231,27 +273,41 @@ def fetch_article_text(url, max_chars=2400):
     except Exception:
         return ""
 
-# ========= ПАРАФРАЗ + 3 абзаца (без анти-дубликата) =========
-SYN_REPLACE = [
-    (r"\bсообщает\b", "передаёт"),
-    (r"\bсообщили\b", "уточнили"),
+# ========= «Научный» стиль (RU) =========
+RU_TONE_REWRITE = [
+    (r"\bсказал(а|и)?\b", "сообщил\\1"),
     (r"\bзаявил(а|и)?\b", "отметил\\1"),
-    (r"\bговорится\b", "отмечается"),
-    (r"\bпрошёл\b", "состоялся"),
-    (r"\bожидается\b", "предполагается"),
-    (r"\bпо данным\b", "согласно данным"),
+    (r"\bпо словам\b", "по данным"),
+    (r"\bпо мнению\b", "согласно оценкам"),
+    (r"\bочевидно\b", "следует отметить"),
+    (r"\bнаверное\b", "вероятно"),
+    (r"\bпримерно\b", "порядка"),
+    (r"\bв том числе\b", "включая"),
+    (r"\bочень\b", "существенно"),
+    (r"\bсильно\b", "значительно"),
 ]
+
+def ru_scientific_paraphrase(s):
+    out = s
+    for pat, repl in RU_TONE_REWRITE:
+        out = re.sub(pat, repl, out, flags=re.IGNORECASE)
+    # нормализуем числа и проценты (10 % -> 10%)
+    out = re.sub(r"\s+%", "%", out)
+    # убираем лишние пробелы
+    out = re.sub(r"\s+", " ", out).strip()
+    return out
 
 def split_sentences(text):
     text = re.sub(r"\s+", " ", text).strip()
     if not text: return []
     return re.split(r"(?<=[.!?])\s+", text)
 
-def paraphrase_sentence(s):
-    out = s
-    for pat, repl in SYN_REPLACE:
-        out = re.sub(pat, repl, out, flags=re.IGNORECASE)
-    return out
+def paraphrase_sentence_ru_or_en(s):
+    # Если английский — сначала переводим, затем стилевой рерайт
+    lang = detect_lang(s)
+    if lang == "en":
+        s = translate_en_to_ru(s)
+    return ru_scientific_paraphrase(s)
 
 def one_context_emoji(context):
     t = (context or "").lower()
@@ -264,15 +320,25 @@ def one_context_emoji(context):
     if any(k in t for k in ["санкц","эмбарго","пошлин","геополит","переговор","президент"]): return "🏛️"
     return "📰"
 
-def build_three_paragraphs(title, article_text, feed_summary):
+def build_three_paragraphs_scientific(title, article_text, feed_summary):
+    """3 абзаца: факт -> детали -> контекст/последствия; EN переводится в RU заранее."""
     base = (article_text or "").strip() or (feed_summary or "").strip()
+    # если основа англоязычная — переведём сразу массивом (меньше запросов)
+    if detect_lang(base) == "en":
+        base = translate_en_to_ru(base)
     sents = [s for s in split_sentences(base) if s]
-    # 1 — суть (1–2 предложения)
-    p1 = " ".join(paraphrase_sentence(s) for s in sents[:2]) or clamp(feed_summary, 250)
-    # 2 — детали (2–3)
-    p2 = " ".join(paraphrase_sentence(s) for s in sents[2:5]) or clamp(base, 300)
-    # 3 — влияние/что дальше (до 3)
-    p3 = " ".join(paraphrase_sentence(s) for s in sents[5:8] or sents[:1])
+
+    # А1 — факт (1–2 предложения)
+    p1_src = sents[:2] or sents[:1]
+    p1 = " ".join(paraphrase_sentence_ru_or_en(s) for s in p1_src)
+
+    # А2 — детали/цифры (2–3 предложения)
+    p2_src = sents[2:5] or sents[:1]
+    p2 = " ".join(paraphrase_sentence_ru_or_en(s) for s in p2_src)
+
+    # А3 — последствия/контекст (до 3 предложений) — берём следующие фразы
+    p3_src = sents[5:8] or sents[1:3] or sents[:1]
+    p3 = " ".join(paraphrase_sentence_ru_or_en(s) for s in p3_src)
 
     emoji = one_context_emoji(f"{title} {base}")
     p1 = f"{emoji} {clamp(p1, 320)}"
@@ -333,8 +399,8 @@ def build_caption(title, para1, para2, para3, link, tags_str):
     if dom: parts += ["", f"Источник: [{dom}]({link})"]
     else:   parts += ["", "Источник: неизвестно"]
 
-    parts += ["", f"[{CHANNEL_NAME}]({CHANNEL_LINK})"]  # канал
-    if tags_str: parts += ["", tags_str]                 # последняя строка — теги
+    parts += ["", f"[{CHANNEL_NAME}]({CHANNEL_LINK})"]
+    if tags_str: parts += ["", tags_str]
 
     cap = "\n".join(parts)
 
@@ -403,8 +469,10 @@ def collect_entries():
 
 # ========= ОБРАБОТКА =========
 def process_item(link, title, feed_summary):
-    article_text = fetch_article_text(link, max_chars=2400)
-    p1, p2, p3 = build_three_paragraphs(title, article_text, feed_summary)
+    article_text = fetch_article_text(link, max_chars=2600)
+
+    # «Научный» рерайт с автопереводом EN→RU при необходимости
+    p1, p2, p3 = build_three_paragraphs_scientific(title, article_text, feed_summary)
 
     entities = extract_entities(title, f"{p1} {p2} {p3}")
     tags_str = gen_smart_tags(title, f"{p1} {p2} {p3}", entities, max_tags=6) or "#новости"
