@@ -414,9 +414,10 @@ def build_full_caption(title, p1, p2, p3, link, hidden_tags):
     body_html = html_escape(body_plain)  # переносы уже \n\n
 
     footer = [
-        f"Источник: {html_escape(dom)}",
-        f'🪙 <a href="{html_escape(CHANNEL_LINK)}">{html_escape(CHANNEL_NAME)}</a>'
-    ]
+    f'Источник: <a href="{html_escape(link)}">{html_escape(dom)}</a>',
+    f'🪙 <a href="{html_escape(CHANNEL_LINK)}">{html_escape(CHANNEL_NAME)}</a>'
+]
+
 
     caption_no_tags = f"{title_html}\n\n{body_html}\n\n" + "\n".join(footer)
 
