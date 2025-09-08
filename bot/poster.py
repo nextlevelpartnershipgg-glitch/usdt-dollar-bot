@@ -267,9 +267,6 @@ def build_full_caption(title, p1, p2, p3, link, hidden_tags):
     body_plain = smart_join_and_trim([p1, p2, p3], max_len=1024-350)
     body_html  = html_escape(body_plain)
 
-    analysis_plain = generate_brief_analysis(title, p1, p2, p3)
-    analysis_html  = html_escape(analysis_plain)
-
     footer = [
         f'Источник: <a href="{html_escape(link)}">{html_escape(dom)}</a>',
         f'🪙 <a href="https://t.me/{CHANNEL_ID.lstrip("@")}">USDT=Dollar</a>'
