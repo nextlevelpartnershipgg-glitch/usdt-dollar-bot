@@ -1,3 +1,4 @@
+# bot/poster.py
 import os, io, json, time, pathlib, hashlib, urllib.parse, random, re
 from datetime import datetime, timezone, timedelta
 from dateutil import parser as dtparse
@@ -30,7 +31,7 @@ HISTORY_FILE = DATA_DIR / "history.json"   # для дайджестов
 
 UA = {"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
 
-# ====== ИСТОЧНИКИ (≥30 РФ + мир; без РИА) ======
+# ====== ИСТОЧНИКИ (РФ + мир; без РИА) ======
 RSS_FEEDS_RU = [
     "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
     "https://rssexport.rbc.ru/rbcnews/economics/30/full.rss",
@@ -145,7 +146,7 @@ LOCAL_EN_RU = {
     "dollar":"доллар","us dollar":"доллар США","reserve":"резерв","reserves":"резервы","safe haven":"тихая гавань",
     "gold":"золото","gold futures":"фьючерсы на золото","comex":"Comex","ounce":"унция","billion":"млрд",
     "percent":"%","percentage":"%","share":"доля","holdings":"запасы","treasuries":"казначейские облигации",
-    "alternative":"альтернатива","geopolitical":"геополитический","risk":"риск","risks":"риски",
+    "alternative":"альтернатива","geopолитический":"геополитический","risk":"риск","risks":"риски",
     "inflation":"инфляция","stability":"стабильность","assets":"активы","backed":"обеспеченный",
     "increase":"рост","rose":"вырос","rise":"рост","jump":"скачок","month":"месяц","monthly":"ежемесячный",
 }
@@ -248,7 +249,7 @@ def gen_hidden_tags(title, body, entities, min_tags=3, max_tags=5):
             if len(tags)>=min_tags: break
     return "||"+" ".join(tags[:max_tags])+"||"
 
-# ====== Градиент (случайный, +30% яркости/контраста) ======
+# ====== Градиент (случайный, +30% яркость/контраст) ======
 PALETTES = [((32,44,80),(12,16,28)),((16,64,88),(8,20,36)),((82,30,64),(14,12,24)),
             ((20,88,72),(8,24,22)),((90,60,22),(20,16,12)),((44,22,90),(16,12,32)),((24,26,32),(12,14,18))]
 def _boost(c, factor=1.3): return tuple(max(0, min(255, int(v*factor))) for v in c)
@@ -388,29 +389,27 @@ def draw_title_card(title_text, src_domain, tzname, event_dt_utc, post_dt_utc):
     d.text((72,H-64),f"source: {src_domain}  •  событие: {ev}",font=f_small,fill=(230,230,230))
     bio=io.BytesIO(); bg.save(bio,format="PNG",optimize=True); bio.seek(0); return bio
 
-# ====== Подпись ======
-def build_caption(title, p1,p2,p3, link, hidden_tags, event_dt_utc, post_dt_utc):
-    title=clamp(title,200)
-    dom=root_domain(link) if link else None
-    tz=ZoneInfo(TIMEZONE)
-    ev=event_dt_utc.astimezone(tz).strftime("%d.%m %H:%M")
-    po=post_dt_utc.astimezone(tz).strftime("%d.%m %H:%M")
-    body=f"{p1}\n\n{p2}\n\n{p3}"
-    parts=[title,"",body,"",f"Время события: {ev}  •  Время поста: {po}","",
-           (f"Источник: [{dom}]({link})" if dom else "Источник: неизвестно"),"",
-           f"🪙 [{CHANNEL_NAME}]({CHANNEL_LINK})"]
-    if hidden_tags: parts+=["",hidden_tags]
-    cap="\n".join(parts)
-    if len(cap)>1024:
-        over=len(cap)-1024+3
-        p3=clamp(p3[:-min(over,len(p3))],300)
-        parts=[title,"",f"{p1}\n\n{p2}\n\n{p3}","",f"Время события: {ev}  •  Время поста: {po}","",
-               (f"Источник: [{dom}]({link})" if dom else "Источник: неизвестно"),"",
-               f"🪙 [{CHANNEL_NAME}]({CHANNEL_LINK})","",hidden_tags]
-        cap="\n".join(parts)
-    return cap
+# ====== Подписи и отправка ======
+def build_caption_short(title, event_dt_utc, post_dt_utc):
+    title = clamp(title, 160)
+    tz = ZoneInfo(TIMEZONE)
+    ev = event_dt_utc.astimezone(tz).strftime("%d.%m %H:%M")
+    po = post_dt_utc.astimezone(tz).strftime("%d.%m %H:%M")
+    return f"{title}\nсобытие: {ev}  •  пост: {po}"
 
-# ====== Telegram ======
+def build_body_text(title, p1, p2, p3, link, hidden_tags):
+    dom = root_domain(link) if link else None
+    parts = [f"*{clamp(title, 200)}*", "", f"{p1}\n\n{p2}\n\n{p3}"]
+    if dom:
+        parts += ["", f"Источник: [{dom}]({link})"]
+    parts += ["", f"🪙 [{CHANNEL_NAME}]({CHANNEL_LINK})"]
+    if hidden_tags:
+        parts += ["", hidden_tags]
+    text = "\n".join(parts)
+    if len(text) > 4000:
+        text = text[:3996] + "…"
+    return text
+
 def send_photo(photo_bytes, caption):
     if not BOT_TOKEN:
         raise RuntimeError("Нет BOT_TOKEN (добавь секрет в Settings → Secrets → Actions)")
@@ -418,7 +417,17 @@ def send_photo(photo_bytes, caption):
     files={"photo":("cover.png",photo_bytes,"image/png")}
     data={"chat_id":CHANNEL_ID,"caption":caption,"parse_mode":"Markdown"}
     r=requests.post(url,files=files,data=data,timeout=30)
-    print("Telegram status:", r.status_code, r.text[:200])
+    print("Telegram photo:", r.status_code, r.text[:200])
+    r.raise_for_status()
+    return r.json()
+
+def send_text(text):
+    if not BOT_TOKEN:
+        raise RuntimeError("Нет BOT_TOKEN")
+    url=f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    data={"chat_id":CHANNEL_ID,"text":text,"parse_mode":"Markdown","disable_web_page_preview":True}
+    r=requests.post(url,data=data,timeout=30)
+    print("Telegram text:", r.status_code, r.text[:200])
     r.raise_for_status()
     return r.json()
 
@@ -458,16 +467,23 @@ def process_item(item, now_utc):
     p1,p2,p3=build_three_paragraphs_scientific(title_ru, article_text, ensure_russian(feed_summary))
     entities=extract_entities(title_ru, f"{p1} {p2} {p3}")
     hidden_tags=gen_hidden_tags(title_ru, f"{p1} {p2} {p3}", entities, min_tags=3, max_tags=5)
+
+    # 1) карточка
     card=draw_title_card(title_ru, domain(link or ""), TIMEZONE, event_dt, now_utc)
-    caption=build_caption(title_ru, p1,p2,p3, link or "", hidden_tags, event_dt, now_utc)
-    resp=send_photo(card, caption)
+    caption_short=build_caption_short(title_ru, event_dt, now_utc)
+    resp_photo=send_photo(card, caption_short)
+
+    # 2) тело поста отдельным сообщением, без превью ссылки
+    body=build_body_text(title_ru, p1, p2, p3, link or "", hidden_tags)
+    resp_text=send_text(body)
+
     append_history({
         "uid": item["uid"], "title": title_ru, "link": link,
         "event_utc": event_dt.isoformat(), "posted_utc": now_utc.isoformat(),
         "tags": hidden_tags
     })
     print(f"Posted: {title_ru[:80]} | event={event_dt.isoformat()}")
-    return resp
+    return {"photo": resp_photo, "text": resp_text}
 
 # ====== MAIN ======
 def trim_posted(posted_set, keep_last=1500):
@@ -489,7 +505,7 @@ def main():
 
     to_post = fresh[:MAX_POSTS_PER_RUN]
 
-    # --- Фолбэк: если свежих нет, берём самое новое за последние N минут ---
+    # фолбэк, если свежих нет
     if not to_post and FALLBACK_ON_NO_FRESH:
         fallback_cutoff = now_utc - timedelta(minutes=FALLBACK_WINDOW_MIN)
         candidates = [it for it in items if it["uid"] not in posted and it["dt"] >= fallback_cutoff]
