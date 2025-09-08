@@ -32,6 +32,7 @@ HISTORY_FILE = DATA_DIR / "history.json"
 UA = {"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
 
 # ========= ИСТОЧНИКИ (РФ + мир; без РИА) =========
+# ========= ИСТОЧНИКИ (только РФ, все на русском) =========
 RSS_FEEDS_RU = [
     "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
     "https://rssexport.rbc.ru/rbcnews/economics/30/full.rss",
@@ -66,19 +67,12 @@ RSS_FEEDS_RU = [
     "https://cbr.ru/StaticHtml/Rss/Press",
     "https://www.moex.com/Export/MRSS/News",
 ]
-RSS_FEEDS_WORLD = [
-    "https://feeds.reuters.com/reuters/marketsNews",
-    "https://feeds.reuters.com/Reuters/worldNews",
-    "https://www.ft.com/?format=rss",
-    "http://feeds.bbci.co.uk/news/business/rss.xml",
-    "https://www.marketwatch.com/rss/topstories",
-    "https://www.cnbc.com/id/100003114/device/rss/rss.html",
-    "https://asia.nikkei.com/rss",
-    "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml",
-    "https://cointelegraph.com/rss",
-    "https://www.theguardian.com/world/rss",
-]
-RSS_FEEDS = RSS_FEEDS_RU + RSS_FEEDS_WORLD
+
+# Мировые источники убираем:
+RSS_FEEDS_WORLD = []
+
+# Используем только RU:
+RSS_FEEDS = RSS_FEEDS_RU
 
 # ========= Pymorphy (опционально) =========
 try:
