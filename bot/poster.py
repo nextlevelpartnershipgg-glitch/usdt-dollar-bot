@@ -231,7 +231,7 @@ def gen_hidden_tags(title, body, entities, min_tags=3, max_tags=5):
     if any(k in text_l for k in ["доллар","usd","евро","eur","рубл","rub","юань","cny","курс","форекс"]): tadd("валюта")
     if any(k in text_l for k in ["акци","рынок","бирж","индекс","nasdaq","nyse","s&p","sp500","dow"]): tadd("рынки")
     if any(k in text_l for k in ["ставк","фрс","цб","инфляц","cpi","ppi","qe","qt"]): tadd("ставки")
-    if any(k in текст_l for k in ["нефть","брент","wti","opec","газ","энерги","lng"]): tadd("энергетика")
+    if any(k in text_1 for k in ["нефть","брент","wti","opec","газ","энерги","lng"]): tadd("энергетика")
     if any(k in text_l for k in ["санкц","эмбарго","пошлин","геополит","переговор","президент"]): tadd("геополитика")
     nouns=extract_candidate_nouns(title+" "+body, entities, limit=12)
     result=[]
