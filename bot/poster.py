@@ -4,11 +4,13 @@ from datetime import datetime
 import requests, feedparser
 from PIL import Image, ImageDraw, ImageFont
 
-# ========= Конфиг из Secrets =========
+# ========= Конфиг из Secrets / Env =========
 BOT_TOKEN   = os.getenv("BOT_TOKEN", "").strip()                 # токен из BotFather
 CHANNEL_ID  = os.getenv("CHANNEL_ID", "").strip()                # @имя_канала (НЕ id группы)
-MAX_POSTS_PER_RUN = int(os.getenv("MAX_POSTS_PER_RUN", "1"))     # сколько новостей постим за запуск
-HTTP_TIMEOUT = 12                                                # таймаут HTTP, сек
+MAX_POSTS_PER_RUN   = int(os.getenv("MAX_POSTS_PER_RUN", "1"))   # сколько новостей постим за запуск
+HTTP_TIMEOUT        = 12                                         # таймаут HTTP, сек
+LOW_QUALITY_MIN_LEN = int(os.getenv("LOW_QUALITY_MIN_LEN", "200"))
+ALLOW_BACKLOG       = os.getenv("ALLOW_BACKLOG", "1") == "1"     # брать «из запаса», если свежих нет
 
 # ========= Русские источники (без РИА) =========
 RSS_FEEDS = [
@@ -45,8 +47,6 @@ RSS_FEEDS = [
     "https://cbr.ru/StaticHtml/Rss/Press",
     "https://www.moex.com/Export/MRSS/News",
 ]
-
-UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
 
 # ========= Состояние (анти-дубликаты) =========
 STATE_PATH = "data/state.json"
@@ -300,63 +300,74 @@ def build_three_paragraphs_scientific(title, summary_text):
     return p1, p2, p3
 
 # ========= Главный цикл =========
+def _process_entries(entries, state, posted_uids, batch_seen, now, posted):
+    for e in entries:
+        if posted[0] >= MAX_POSTS_PER_RUN:
+            break
+
+        title   = (getattr(e, "title", "") or "").strip()
+        summary = (getattr(e, "summary", getattr(e, "description", "")) or "").strip()
+        link    = (getattr(e, "link", "") or "").strip()
+
+        if detect_lang(title + " " + summary) != "ru":
+            continue
+
+        uid = _uid_for(link, title)
+        if uid in posted_uids or uid in batch_seen:
+            continue
+
+        title_ru = tidy_paragraph(title)
+        p1, p2, p3 = build_three_paragraphs_scientific(title_ru, summary)
+        body_len = len((p1 + " " + p2 + " " + p3).strip())
+        if body_len < LOW_QUALITY_MIN_LEN:
+            print("Skip low-quality item:", title_ru[:90]); continue
+
+        domain = re.sub(r"^www\.", "", link.split("/")[2]) if link else "source"
+        card   = draw_card(title_ru, domain, now)
+        hidden = extract_tags_source(title_ru + " " + summary, 3, 5)
+        caption = build_full_caption(title_ru, p1, p2, p3, link, hidden)
+
+        try:
+            send_photo_with_caption(card, caption)
+            posted[0] += 1
+            batch_seen.add(uid)
+            posted_uids.add(uid)
+            state["posted"] = list(posted_uids)[-5000:]
+            _save_state(state)
+            time.sleep(1.0)
+        except Exception as ex:
+            print("Error sending:", ex)
+
 def main():
     state = _load_state()
     posted_uids = set(state.get("posted", []))
     batch_seen  = set()
-    posted = 0
+    posted = [0]  # списком, чтобы изменять по ссылке
     now = datetime.now().strftime("%d.%m %H:%M")
 
+    # 1) основной проход — ищем свежие
     for feed_url in RSS_FEEDS:
         try:
             fp = feedparser.parse(feed_url)
         except Exception as e:
             print("Feed error:", feed_url, e); continue
-
-        for e in fp.entries:
-            if posted >= MAX_POSTS_PER_RUN:
-                break
-
-            title   = (getattr(e, "title", "") or "").strip()
-            summary = (getattr(e, "summary", getattr(e, "description", "")) or "").strip()
-            link    = (getattr(e, "link", "") or "").strip()
-
-            # только русские записи
-            if detect_lang(title + " " + summary) != "ru":
-                continue
-
-            uid = _uid_for(link, title)
-            if uid in posted_uids or uid in batch_seen:
-                continue
-
-            title_ru = tidy_paragraph(title)
-            p1, p2, p3 = build_three_paragraphs_scientific(title_ru, summary)
-
-            # выбросим слишком короткие тексты
-            body_len = len((p1 + " " + p2 + " " + p3).strip())
-            if body_len < 220:
-                print("Skip low-quality item:", title_ru[:90]); continue
-
-            domain = re.sub(r"^www\.", "", link.split("/")[2]) if link else "source"
-            card   = draw_card(title_ru, domain, now)
-            hidden = extract_tags_source(title_ru + " " + summary, 3, 5)
-            caption = build_full_caption(title_ru, p1, p2, p3, link, hidden)
-
-            try:
-                send_photo_with_caption(card, caption)
-                posted += 1
-                batch_seen.add(uid)
-                posted_uids.add(uid)
-                state["posted"] = list(posted_uids)[-5000:]
-                _save_state(state)
-                time.sleep(1.0)
-            except Exception as ex:
-                print("Error sending:", ex)
-
-        if posted >= MAX_POSTS_PER_RUN:
+        _process_entries(fp.entries, state, posted_uids, batch_seen, now, posted)
+        if posted[0] >= MAX_POSTS_PER_RUN:
             break
 
-    if posted == 0:
+    # 2) бэкап-режим — берём ближайшее не опубликованное (чтобы пост был раз в 10 минут)
+    if posted[0] == 0 and ALLOW_BACKLOG:
+        print("No fresh posts. Trying backlog mode...")
+        for feed_url in RSS_FEEDS:
+            try:
+                fp = feedparser.parse(feed_url)
+            except Exception as e:
+                print("Feed error:", feed_url, e); continue
+            _process_entries(fp.entries, state, posted_uids, batch_seen, now, posted)
+            if posted[0] >= MAX_POSTS_PER_RUN:
+                break
+
+    if posted[0] == 0:
         print("Nothing to post.")
 
 if __name__ == "__main__":
