@@ -1,5 +1,7 @@
-feedparser
-requests
-python-dateutil
-Pillow
-beautifulsoup4
+feedparser 
+requests 
+beautifulsoup4 
+python-dateutil 
+Pillow 
+pymorphy2 
+pymorphy2-dicts-ru
