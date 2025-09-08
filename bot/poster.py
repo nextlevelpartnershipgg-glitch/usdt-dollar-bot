@@ -32,6 +32,66 @@ HISTORY_FILE = DATA_DIR / "history.json"
 UA = {"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
 
 # ========= ИСТОЧНИКИ (РФ + мир; без РИА) =========
+# ===== Текст: капс первой буквы + баланс скобок/кавычек =====
+def _smart_capitalize(s: str) -> str:
+    s = re.sub(r"\s+", " ", (s or "").strip())
+    if not s:
+        return s
+    m = re.search(r"[A-Za-zА-Яа-яЁё]", s)
+    if not m:
+        return s
+    i = m.start()
+    return s[:i] + s[i].upper() + s[i+1:]
+
+def _remove_unmatched(s: str, open_ch: str, close_ch: str) -> str:
+    bal = 0
+    out = []
+    for ch in s:
+        if ch == open_ch:
+            bal += 1
+            out.append(ch)
+        elif ch == close_ch:
+            if bal == 0:
+                # лишняя закрывающая — выкидываем
+                continue
+            bal -= 1
+            out.append(ch)
+        else:
+            out.append(ch)
+    # если остались незакрытые — добавим закрывающие в конец
+    if bal > 0:
+        out.append(close_ch * bal)
+    return "".join(out)
+
+def _balance_brackets_and_quotes(s: str) -> str:
+    s = _remove_unmatched(s, "(", ")")
+    s = _remove_unmatched(s, "[", "]")
+    # русские «ёлочки»
+    opens = s.count("«"); closes = s.count("»")
+    if closes > opens:
+        # выкинуть лишние закрывающие «»
+        need = opens
+        buf = []
+        seen = 0
+        for ch in s:
+            if ch == "»":
+                if seen >= need:
+                    continue
+                seen += 1
+            buf.append(ch)
+        s = "".join(buf)
+    elif opens > closes:
+        s += "»" * (opens - closes)
+    return s
+
+def tidy_paragraph(p: str) -> str:
+    p = (p or "").strip()
+    if not p:
+        return p
+    p = _balance_brackets_and_quotes(p)
+    p = _smart_capitalize(p)
+    return p
+
 # ========= ИСТОЧНИКИ (только РФ, все на русском) =========
 RSS_FEEDS_RU = [
     "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
@@ -328,8 +388,11 @@ def build_three_paragraphs_scientific(title, article_text, feed_summary):
     p1=" ".join(paraphrase_sentence_ru_or_en(s) for s in p1_src)
     p2=" ".join(paraphrase_sentence_ru_or_en(s) for s in p2_src)
     p3=" ".join(paraphrase_sentence_ru_or_en(s) for s in p3_src)
-    emoji=one_context_emoji(f"{title} {base_ru}")
-    return f"{emoji} {p1}".strip(), p2.strip(), p3.strip()
+    emoji = one_context_emoji(f"{title} {base_ru}")
+p1 = tidy_paragraph(f"{emoji} {p1}".strip())
+p2 = tidy_paragraph(p2.strip())
+p3 = tidy_paragraph(p3.strip())
+return p1, p2, p3
 
 # ========= Рендер карточки =========
 def wrap_text_by_width(draw, text, font, max_width, max_lines=5):
