@@ -126,10 +126,6 @@ def clean_html(html):
     soup = BeautifulSoup(html, "html.parser")
     return " ".join(soup.get_text(separator=" ").split())
 
-def clamp(s, n):
-    s = (s or "").strip()
-    return s if len(s) <= n else s[:n-1] + "…"
-
 # ========= Перевод EN→RU =========
 def detect_lang(text: str) -> str:
     if re.search(r"[А-Яа-яЁё]", text): return "ru"
@@ -175,6 +171,11 @@ def ensure_russian(text: str) -> str:
 COMPANY_HINTS = ["Apple","Microsoft","Tesla","Meta","Google","Alphabet","Amazon","Nvidia","Samsung","Intel","Huawei",
                  "Газпром","Сбербанк","Яндекс","Роснефть","Лукойл","Норникель","Татнефть","Новатэк","ВТБ","Сургутнефтегаз"]
 TICKER_PAT = re.compile(r"\b[A-Z]{2,6}\b")
+
+RU_STOP=set("это тот эта которые который которой которых также чтобы при про для на из от по как уже еще или либо чем если когда где куда весь все вся его ее их наш ваш мой твой один одна одно".split())
+COUNTRY_PROPER={"россия":"Россия","сша":"США","китай":"Китай","япония":"Япония","германия":"Германия","франция":"Франция",
+                "великобритания":"Великобритания","индия":"Индия","европа":"Европа","украина":"Украина","турция":"Турция"}
+
 def extract_entities(title, summary):
     text = f"{title} {summary}".strip()
     names = re.findall(r"(?:[A-ZА-ЯЁ][a-zа-яё]+(?:\s+[A-ZА-ЯЁ][a-zа-яё]+){0,2})", text)
@@ -188,24 +189,21 @@ def extract_entities(title, summary):
         if x not in seen: seen.add(x); uniq.append(x)
     return uniq or ["рынки","экономика"]
 
-COUNTRY_PROPER={"россия":"Россия","сша":"США","китай":"Китай","япония":"Япония","германия":"Германия","франция":"Франция",
-                "великобритания":"Великобритания","индия":"Индия","европа":"Европа","украина":"Украина","турция":"Турция"}
-RU_STOP=set("это тот эта которые который которой которых также чтобы при про для на из от по как уже еще или либо чем если когда где куда весь все вся его ее их наш ваш мой твой один одна одно".split())
 def lemma_noun(word):
     w=word.lower()
-    if MORPH:
-        p=MORPH.parse(w)[0]
-        if "NOUN" in p.tag:
-            nf=p.normal_form
-            return COUNTRY_PROPER.get(nf, nf)
+    try:
+        if MORPH:
+            p=MORPH.parse(w)[0]
+            if "NOUN" in p.tag:
+                nf=p.normal_form
+                return COUNTRY_PROPER.get(nf, nf)
+    except Exception:
+        pass
     return w
+
 def extract_candidate_nouns(text, entities, limit=12):
     words=re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", text)
-    candidates=[]
-    for w in words:
-        wl=w.lower()
-        if wl in RU_STOP: continue
-        candidates.append(wl)
+    candidates=[w.lower() for w in words if w.lower() not in RU_STOP]
     for e in entities:
         if re.fullmatch(r"[A-Z]{2,6}", e): candidates.append(e)
         else: candidates += e.split()
@@ -221,6 +219,7 @@ def extract_candidate_nouns(text, entities, limit=12):
     out=[re.sub(r"[^A-Za-zА-Яа-яЁё0-9]","",x) for x in out]
     out=[x for x in out if x and x.lower() not in RU_STOP]
     return out[:limit]
+
 def gen_hidden_tags(title, body, entities, min_tags=3, max_tags=5):
     text_l = (title + " " + body).lower()
     thematic=[]
@@ -389,62 +388,42 @@ def draw_title_card(title_text, src_domain, tzname, event_dt_utc, post_dt_utc):
     d.text((72,H-64),f"source: {src_domain}  •  событие: {ev}",font=f_small,fill=(230,230,230))
     bio=io.BytesIO(); bg.save(bio,format="PNG",optimize=True); bio.seek(0); return bio
 
-# ========= MarkdownV2: экранирование и умное обрезание =========
-MDV2_ESCAPE = r'[_\*\[\]\(\)~`>#+\-=\{\}\.\!]'
-def escape_mdv2(text: str) -> str:
-    # не экранируем # (пусть хэштеги работают) и | (нужны для спойлеров)
-    # экранируем остальные спец-символы MarkdownV2
-    return re.sub(MDV2_ESCAPE, lambda m: "\\" + m.group(0), text)
+# ========= HTML caption: экранирование и умное сокращение =========
+def html_escape(s: str) -> str:
+    return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 def smart_join_and_trim(paragraphs, max_len=1024):
-    """
-    Склеиваем параграфы и, если нужно, обрезаем по границе предложения,
-    чтобы не рвать текст. Лимит — под Telegram caption (~1024).
-    """
     raw = "\n\n".join([p for p in paragraphs if p])
     if len(raw) <= max_len:
         return raw
-    # обрежем на ближайшей границе предложения до лимита
     cut = raw[:max_len]
-    m = re.findall(r"[.!?…]\s", cut)
-    if m:
-        # берем последнюю точку/границу
-        last = max(cut.rfind(x) for x in [". ", "! ", "? ", "… ", ".\n", "!\n", "?\n", "…\n"] if cut.rfind(x) != -1)
-        if last != -1:
-            return cut[:last+1].rstrip()
-    # если границы нет — мягко обрежем и добавим многоточие
+    for sep in [". ", "! ", "? ", "… ", ".\n", "!\n", "?\n", "…\n"]:
+        pos = cut.rfind(sep)
+        if pos != -1:
+            return cut[:pos+1].rstrip()
     return cut[:-1].rstrip() + "…"
 
-# ========= Подпись к одному сообщению =========
 def build_full_caption(title, p1, p2, p3, link, hidden_tags):
     dom = root_domain(link) if link else "источник"
-    # экранируем заголовок для MarkdownV2 и делаем жирным
-    title_esc = escape_mdv2(title)
-    title_line = f"*{title_esc}*"
+    title_html = f"<b>{html_escape(title)}</b>"
+    body_plain = smart_join_and_trim([p1, p2, p3], max_len=1024 - 220)
+    body_html = html_escape(body_plain).replace("\n", "<br>")
+    footer_html = f'Источник: {html_escape(dom)}<br><br>🪙 <a href="{html_escape(CHANNEL_LINK)}">{html_escape(CHANNEL_NAME)}</a>'
+    caption_no_tags = f"{title_html}<br><br>{body_html}<br><br>{footer_html}"
 
-    # текст без времени (оно на карточке)
-    body_plain = smart_join_and_trim([p1, p2, p3], max_len=1024 - 200)  # оставим запас под хвост
-    body_esc = escape_mdv2(body_plain)
-
-    footer_lines = [
-        f"Источник: {escape_mdv2(dom)}",
-        f"🪙 [{escape_mdv2(CHANNEL_NAME)}]({escape_mdv2(CHANNEL_LINK)})"
-    ]
-    text_no_tags = "\n\n".join([title_line, body_esc, "", "\n".join(footer_lines)])
-    # проверим общий размер с тегами
     if hidden_tags:
-        if len(text_no_tags) + 2 + len(hidden_tags) <= 1024:
-            return text_no_tags + "\n\n" + hidden_tags
-        else:
-            return text_no_tags  # если не помещается — теги отбросим
-    return text_no_tags
+        inner = hidden_tags.strip("|")  # "||...||" -> "..."; хэштеги останутся текстом
+        spoiler_html = f'<br><br><span class="tg-spoiler">{html_escape(inner)}</span>'
+        if len(caption_no_tags + spoiler_html) <= 1024:
+            return caption_no_tags + spoiler_html
+    return caption_no_tags
 
 def send_photo_with_caption(photo_bytes, caption):
     if not BOT_TOKEN:
         raise RuntimeError("Нет BOT_TOKEN (добавь секреты в Settings → Secrets → Actions)")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
     files = {"photo": ("cover.png", photo_bytes, "image/png")}
-    data = {"chat_id": CHANNEL_ID, "caption": caption, "parse_mode": "MarkdownV2"}
+    data = {"chat_id": CHANNEL_ID, "caption": caption, "parse_mode": "HTML"}
     r = requests.post(url, files=files, data=data, timeout=30)
     print("Telegram sendPhoto:", r.status_code, r.text[:200])
     r.raise_for_status()
@@ -492,7 +471,7 @@ def process_item(item, now_utc):
     p1, p2, p3 = build_three_paragraphs_scientific(title_ru, article_text, ensure_russian(feed_summary))
 
     if is_low_quality(title_ru, p1, p2, p3):
-        print("Skip low-quality item:", clamp(title_ru, 80))
+        print("Skip low-quality item:", title_ru[:80])
         return None
 
     entities = extract_entities(title_ru, f"{p1} {p2} {p3}")
@@ -507,7 +486,7 @@ def process_item(item, now_utc):
         "event_utc": event_dt.isoformat(), "posted_utc": now_utc.isoformat(),
         "tags": hidden_tags
     })
-    print(f"Posted (single): {title_ru[:80]} | event={event_dt.isoformat()}")
+    print(f"Posted: {title_ru[:80]}")
     return resp
 
 # ========= MAIN =========
@@ -543,10 +522,10 @@ def main():
         anyc.sort(key=lambda x: x["dt"], reverse=True)
         to_post = anyc[:MAX_POSTS_PER_RUN]
         if to_post:
-            print("ALWAYS_POST used: took newest item regardless of time window.")
+            print("ALWAYS_POST used: took newest item.")
 
     if not to_post:
-        print("Nothing to post (fresh window + fallback disabled/empty)."); return
+        print("Nothing to post."); return
 
     posted_any = False
     for it in to_post:
