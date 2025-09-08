@@ -1,9 +1,9 @@
-name: Auto Poster (every 12 min)
+name: Auto Poster (every 10 min)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/12 * * * *"   # каждые 12 минут (UTC)
+    - cron: "*/10 * * * *"   # каждые 10 минут (UTC) → :00, :10, :20 ...
 
 concurrency:
   group: autopost
@@ -13,6 +13,7 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 8
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,9 +31,9 @@ jobs:
       - name: Run poster
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}   # например @usdtdollarm
           TIMEZONE: Europe/Moscow
-          MAX_POSTS_PER_RUN: "1"       # 1 пост за прогон → ~5/час
+          MAX_POSTS_PER_RUN: "1"         # публикуем по одной новости за прогон
           LOOKBACK_MINUTES: "30"
           FRESH_WINDOW_MIN: "25"
           MIN_EVENT_YEAR: "2023"
