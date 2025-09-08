@@ -3,14 +3,14 @@ name: Auto Poster (every 10 min)
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/10 * * * *"   # каждые 10 минут (UTC) → :00, :10, :20 ...
+    - cron: "*/10 * * * *"   # каждые 10 минут по UTC
 
 permissions:
-  contents: write            # нужно, чтобы коммитить data/history.json и data/state.json
+  contents: write            # чтобы коммитить data/history.json и state.json
 
 concurrency:
   group: autopost
-  cancel-in-progress: true   # не запускать второй прогон, пока идёт предыдущий
+  cancel-in-progress: true
 
 jobs:
   run-bot:
@@ -34,16 +34,21 @@ jobs:
       - name: Run poster
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
-          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}   # например: @usdtdollarm
-          TIMEZONE: Europe/Moscow                 # локальное время для карточек/подписей
-          # --- логика свежести ---
-          MAX_POSTS_PER_RUN: "1"                  # 1 новость за прогон → публикации каждые 10 минут
-          LOOKBACK_MINUTES: "30"                  # запас на лаги фидов
-          FRESH_WINDOW_MIN: "25"                  # считаем «свежими» в пределах 25 минут
-          MIN_EVENT_YEAR: "2023"                  # отрезаем вечнозелёдные древние ленты
-          # --- фолбэк, если свежих нет ---
-          FALLBACK_ON_NO_FRESH: "1"               # включить режим «всегда есть пост»
-          FALLBACK_WINDOW_MIN: "360"              # брать самое новое за последние 6 часов
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}   # например @usdtdollarm
+          TIMEZONE: Europe/Moscow
+
+          # логика свежести
+          MAX_POSTS_PER_RUN: "1"
+          LOOKBACK_MINUTES: "30"
+          FRESH_WINDOW_MIN: "25"
+          MIN_EVENT_YEAR: "2023"
+
+          # фолбэк, если свежих нет
+          FALLBACK_ON_NO_FRESH: "1"
+          FALLBACK_WINDOW_MIN: "360"    # 6 часов
+
+          # режим «всегда постить» (если вообще ничего нет)
+          ALWAYS_POST: "1"
         run: |
           python bot/poster.py
 
