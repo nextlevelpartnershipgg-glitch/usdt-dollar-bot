@@ -1,4 +1,4 @@
-import os, io, json, time, textwrap, pathlib, hashlib, urllib.parse, random, re, math
+import os, io, json, time, pathlib, hashlib, urllib.parse, random, re, math
 from datetime import datetime, timezone, timedelta
 from dateutil import parser as dtparse
 import feedparser, requests
@@ -18,55 +18,24 @@ CHANNEL_LINK   = os.environ.get("CHANNEL_LINK", f"https://t.me/{CHANNEL_HANDLE.l
 MAX_POSTS_PER_RUN = int(os.environ.get("MAX_POSTS_PER_RUN", "5"))
 LOOKBACK_MINUTES  = int(os.environ.get("LOOKBACK_MINUTES", "90"))
 
-# ========= RSS ИСТОЧНИКИ =========
+# ========= КОРОТКИЙ СПИСОК ИСТОЧНИКОВ (видно, что постим «из нескольких») =========
+# RU (без РИА)
 RSS_FEEDS_RU = [
-    "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
-    "https://rssexport.rbc.ru/rbcnews/economics/30/full.rss",
-    "https://rssexport.rbc.ru/rbcnews/finance/30/full.rss",
-    "https://rssexport.rbc.ru/rbcnews/politics/30/full.rss",
-    "https://lenta.ru/rss/news",
-    "https://lenta.ru/rss/economics",
-    "https://lenta.ru/rss/russia",
-    "https://lenta.ru/rss/world",
-    "https://www.kommersant.ru/RSS/news.xml",
-    "https://www.kommersant.ru/RSS/economics.xml",
-    "https://www.kommersant.ru/RSS/finance.xml",
-    "https://www.gazeta.ru/export/rss/first.xml",
-    "https://www.gazeta.ru/export/rss/business.xml",
-    "https://www.gazeta.ru/export/rss/politics.xml",
-    "https://tass.ru/rss/v2.xml",
-    "https://www.vedomosti.ru/rss/news",
-    "https://www.interfax.ru/rss.asp",
-    "https://ria.ru/export/rss2/archive/index.xml",
-    "https://iz.ru/xml/rss/all.xml",
-    "https://www.finmarket.ru/rss/news.asp",
-    "https://banki.ru/xml/news.rss",
-    "https://www.kommersant.ru/RSS/regions.xml",
-    "https://www.kommersant.ru/RSS/tech.xml",
+    "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",           # РБК (общая)
+    "https://www.kommersant.ru/RSS/news.xml",                      # Коммерсантъ (новости)
+    "https://lenta.ru/rss/news",                                   # Lenta.ru (новости)
+    "https://tass.ru/rss/v2.xml",                                  # ТАСС
+    "https://www.vedomosti.ru/rss/news",                           # Ведомости
+    "https://www.interfax.ru/rss.asp",                             # Интерфакс
 ]
+# WORLD / MARKETS / CRYPTO (короткий список)
 RSS_FEEDS_WORLD = [
-    "https://feeds.reuters.com/reuters/businessNews",
-    "https://feeds.reuters.com/Reuters/worldNews",
-    "https://feeds.reuters.com/reuters/marketsNews",
-    "https://feeds.bloomberg.com/politics/news.rss",
-    "https://www.bloomberg.com/feeds/podcasts/etf_report.xml",
-    "https://www.ft.com/?format=rss",
-    "https://feeds.a.dj.com/rss/RSSMarketsMain.xml",
-    "https://feeds.a.dj.com/rss/RSSWorldNews.xml",
-    "http://feeds.bbci.co.uk/news/world/rss.xml",
-    "http://feeds.bbci.co.uk/news/business/rss.xml",
-    "http://rss.cnn.com/rss/edition_world.rss",
-    "https://www.cnbc.com/id/100003114/device/rss/rss.html",
-    "https://www.theguardian.com/world/rss",
-    "https://www.theguardian.com/uk/business/rss",
-    "https://rss.nytimes.com/services/xml/rss/nyt/World.xml",
-    "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
-    "https://www.marketwatch.com/rss/topstories",
-    "https://www.aljazeera.com/xml/rss/all.xml",
-    "https://asia.nikkei.com/rss",
-    "https://www.scmp.com/rss/91/feed",
-    "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml",
-    "https://cointelegraph.com/rss",
+    "https://feeds.reuters.com/reuters/marketsNews",               # Reuters Markets
+    "https://feeds.reuters.com/Reuters/worldNews",                 # Reuters World
+    "https://www.ft.com/?format=rss",                              # Financial Times
+    "http://feeds.bbci.co.uk/news/business/rss.xml",               # BBC Business
+    "https://www.marketwatch.com/rss/topstories",                  # MarketWatch
+    "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml", # CoinDesk
 ]
 RSS_FEEDS = RSS_FEEDS_RU + RSS_FEEDS_WORLD
 
@@ -74,7 +43,6 @@ DATA_DIR = pathlib.Path("data"); DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_DIR / "state.json"
 
 UA  = {"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
-UA_IMG = {"User-Agent":"Mozilla/5.0"}
 
 # ========= PYMORPHY2 (для тегов) =========
 try:
@@ -99,15 +67,13 @@ def root_domain(url):
     try:
         dom = urllib.parse.urlparse(url).netloc.replace("www.","")
         parts = dom.split(".")
-        if len(parts) > 2:
-            dom = ".".join(parts[-2:])
+        if len(parts) > 2: dom = ".".join(parts[-2:])
         return dom
     except Exception:
         return "источник"
 
 def clean_html(html):
-    if not html:
-        return ""
+    if not html: return ""
     soup = BeautifulSoup(html, "html.parser")
     return " ".join(soup.get_text(separator=" ").split())
 
@@ -115,46 +81,59 @@ def clamp(s, n):
     s = (s or "").strip()
     return s if len(s) <= n else s[:n-1] + "…"
 
-# ========= ЯЗЫК / ПЕРЕВОД =========
+# ========= ЯЗЫК / ПЕРЕВОД (усиленный) =========
 def detect_lang(text: str) -> str:
-    if re.search(r"[А-Яа-яЁё]", text):
-        return "ru"
-    en_hits = len(re.findall(r"\b(the|and|of|to|in|for|on|with|from|by|as|at|is|are)\b", text.lower()))
-    ru_hits = len(re.findall(r"\b(и|в|на|по|для|из|от|как|это|что|бы|не|к)\b", text.lower()))
+    if re.search(r"[А-Яа-яЁё]", text): return "ru"
+    en_hits = len(re.findall(r"\b(the|and|of|to|in|for|on|with|from|by|as|at|is|are|this|that|it|was|be)\b", text.lower()))
+    ru_hits = len(re.findall(r"\b(и|в|на|по|для|из|от|как|это|что|бы|не|к|с|о|об)\b", text.lower()))
     return "en" if en_hits > ru_hits else "ru"
 
 LT_ENDPOINTS = [
     "https://libretranslate.de/translate",
     "https://translate.argosopentech.com/translate",
 ]
+
+# «Толстый» локальный словарь на случай, если онлайн-перевод недоступен.
 LOCAL_EN_RU = {
-    "fed": "ФРС", "ecb":"ЕЦБ", "bank of england":"Банк Англии", "bank of japan":"Банк Японии",
-    "inflation":"инфляция", "cpi":"индекс CPI", "ppi":"индекс PPI",
-    "rate":"ставка", "rates":"ставки", "hike":"повышение", "cut":"снижение",
-    "recession":"рецессия", "growth":"рост", "gdp":"ВВП",
-    "oil":"нефть", "gas":"газ", "brent":"Brent", "wti":"WTI",
-    "stocks":"акции", "bonds":"облигации", "equities":"акции", "yields":"доходности",
-    "dollar":"доллар", "euro":"евро", "ruble":"рубль", "yuan":"юань",
-    "bitcoin":"биткоин", "ethereum":"эфириум", "crypto":"криптовалюта",
+    "china":"Китай","beijing":"Пекин","central bank":"центральный банк","central banks":"центральные банки",
+    "dollar":"доллар","us dollar":"доллар США","reserve":"резерв","reserves":"резервы","safe haven":"тихая гавань",
+    "gold":"золото","gold futures":"фьючерсы на золото","comex":"Comex","ounce":"унция","billion":"млрд",
+    "percent":"%", "percentage":"%", "share":"доля","holdings":"запасы","treasuries":"казначейские облигации",
+    "alternative":"альтернатива","geopolitical":"геополитический","risk":"риск","risks":"риски",
+    "inflation":"инфляция","stability":"стабильность","assets":"активы","backed":"обеспеченный",
+    "increase":"рост","rose":"вырос","rise":"рост","jump":"скачок","month":"месяц","monthly":"ежемесячный",
 }
-def translate_en_to_ru(text: str, timeout=12) -> str:
-    text = text.strip()
-    if not text:
-        return text
+
+def translate_hard_ru(text: str, timeout=14) -> str:
+    """Сначала LibreTranslate (несколько узлов), если не удалось — локальный фолбэк.
+       Возвращаем гарантированно русский текст (насколько возможно)."""
+    text = (text or "").strip()
+    if not text: return text
+    # 1) онлайн
     for ep in LT_ENDPOINTS:
         try:
             r = requests.post(ep, data={"q": text, "source":"en", "target":"ru", "format":"text"},
                               headers={"Accept":"application/json"}, timeout=timeout)
             if r.status_code == 200:
                 out = (r.json() or {}).get("translatedText", "")
-                if out.strip():
-                    return out.strip()
+                if out and detect_lang(out) == "ru": return out.strip()
         except Exception:
             continue
+    # 2) локальный фолбэк: простая подмена частых слов + сохранение структуры
     s = text
+    # сначала длинные фразы
     for k in sorted(LOCAL_EN_RU.keys(), key=lambda x: -len(x)):
         s = re.sub(rf"\b{re.escape(k)}\b", LOCAL_EN_RU[k], s, flags=re.IGNORECASE)
+    # базовые замены единиц/чисел
+    s = re.sub(r"\bUS\$","$", s)
+    s = re.sub(r"\bper cent\b","%", s, flags=re.IGNORECASE)
+    # Пометим латиницу как «(англ.)», чтобы не выглядело как пропуск
+    if detect_lang(s) == "en":
+        s = "Перевод (упрощённый): " + s
     return s
+
+def ensure_russian(text: str) -> str:
+    return translate_hard_ru(text) if detect_lang(text) == "en" else text
 
 # ========= ИЗВЛЕЧЕНИЕ СУЩНОСТЕЙ =========
 COMPANY_HINTS = [
@@ -176,173 +155,29 @@ def extract_entities(title, summary):
     for x in out:
         if x not in seen:
             seen.add(x); uniq.append(x)
-    return uniq or ["finance","market"]
+    return uniq or ["рынки","экономика"]
 
-# ========= КОНТЕКСТНОЕ ФОТО: Wikipedia → Unsplash → Picsum → Градиент =========
-COUNTRY_PROPER = {
-    "россия":"Россия","сша":"США","китай":"Китай","япония":"Япония","германия":"Германия","франция":"Франция",
-    "великобритания":"Великобритания","индия":"Индия","европа":"Европа","украина":"Украина","турция":"Турция",
-}
-def topic_wiki_titles(text_lower):
-    t = text_lower; titles=[]
-    a=titles.append
-    if "инфляц" in t or "cpi" in t: a("Inflation"); a("Consumer price index")
-    if "ставк" in t or "фрс" in t or "federal reserve" in t: a("Federal Reserve")
-    if "ецб" in t or "european central bank" in t: a("European Central Bank")
-    if "банк япони" in t or "boj" in t: a("Bank of Japan")
-    if "банк англи" in t: a("Bank of England")
-    if "нефть" in t or "brent" in t: a("Brent crude"); a("Petroleum")
-    if "wti" in t: a("West Texas Intermediate")
-    if "газ" in t: a("Natural gas")
-    if "золото" in t or "xau" in t: a("Gold")
-    if "биткоин" in t or "bitcoin" in t or "btc" in t: a("Bitcoin")
-    if "ethereum" in t or "эфириум" in t or "eth" in t: a("Ethereum")
-    if "stablecoin" in t or "usdt" in t: a("Tether (cryptocurrency)")
-    if "доллар" in t or "usd" in t: a("United States dollar")
-    if "евро" in t or "eur" in t: a("Euro")
-    if "рубл" in t or "rub" in t: a("Russian ruble")
-    if "юань" in t or "cny" in t: a("Renminbi")
-    if "санкц" in t or "эмбарго" in t: a("Sanctions (international relations)")
-    return list(dict.fromkeys(titles))
-
-def http_json(url, params=None, timeout=12):
-    r = requests.get(url, params=params, headers=UA, timeout=timeout)
-    if r.status_code != 200: return None
-    return r.json()
-
-def wiki_summary_image(title, lang="ru"):
-    try:
-        api = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(title)}"
-        data = http_json(api, {})
-        if not data: return None
-        if "originalimage" in data and data["originalimage"].get("source"):
-            return data["originalimage"]["source"]
-        if "thumbnail" in data and data["thumbnail"].get("source"):
-            return data["thumbnail"]["source"]
-    except Exception:
-        pass
-    return None
-
-def wiki_search_image(query, lang="ru"):
-    url = wiki_summary_image(query, lang)
-    if url: return url
-    try:
-        res = http_json(f"https://{lang}.wikipedia.org/w/rest.php/v1/search/title",
-                        params={"q": query, "limit": 1})
-        if res and res.get("pages"):
-            key = res["pages"][0].get("key")
-            if key:
-                url = wiki_summary_image(key, lang)
-                if url: return url
-    except Exception:
-        pass
-    return None
-
-def download_image(url, timeout=20):
-    r = requests.get(url, headers=UA_IMG, timeout=timeout, allow_redirects=True)
-    if r.status_code != 200: return None
-    try:
-        return Image.open(io.BytesIO(r.content)).convert("RGB")
-    except Exception:
-        return None
-
-def resize_cover(img, W, H):
-    w, h = img.size
-    if w == 0 or h == 0: return img.resize((W,H))
-    scale = max(W / w, H / h)
-    new_w, new_h = int(w*scale), int(h*scale)
-    img = img.resize((new_w, new_h), Image.LANCZOS)
-    left = (new_w - W) // 2
-    top  = (new_h - H) // 2
-    return img.crop((left, top, left+W, top+H))
-
-def unsplash_by_context(keywords, w=1080, h=540, retries=3):
-    q = ",".join(keywords[:4]) if isinstance(keywords, list) else str(keywords)
-    for i in range(retries):
-        try:
-            seed = random.randint(0, 10_000_000)
-            url = f"https://source.unsplash.com/{w}x{h}/?{urllib.parse.quote(q)}&sig={seed}"
-            r = requests.get(url, headers=UA_IMG, timeout=25, allow_redirects=True)
-            if r.status_code == 200:
-                return Image.open(io.BytesIO(r.content)).convert("RGB"), "source.unsplash.com"
-            time.sleep(0.6*(i+1))
-        except Exception:
-            time.sleep(0.6*(i+1))
-    return None, None
-
-def picsum_fallback(w=1080, h=540):
-    try:
-        seed = random.randint(1, 10_000_000)
-        url = f"https://picsum.photos/{w}/{h}?random={seed}"
-        r = requests.get(url, headers=UA_IMG, timeout=20, allow_redirects=True)
-        if r.status_code == 200:
-            return Image.open(io.BytesIO(r.content)).convert("RGB"), "picsum.photos"
-    except Exception:
-        pass
-    return None, None
-
-def build_image_candidates(title, body, entities):
-    text_l = f"{title} {body}".lower()
-    cands = []
-    for e in entities:
-        cands.append(e)
-    cands += topic_wiki_titles(text_l)
-    for k,v in COUNTRY_PROPER.items():
-        if k in text_l: cands.append(v)
-    extra = []
-    if "рынок" in text_l or "индекс" in text_l: extra += ["Stock market index","Stock exchange"]
-    if "облигац" in text_l or "доходност" in text_l: extra += ["Government bond","Bond (finance)","Yield (finance)"]
-    if "санкц" in text_l: extra += ["Sanctions (international relations)"]
-    if "банк" in text_l and "цент" in text_l: extra += ["Central bank"]
-    cands += extra
-    # уникализация
-    seen=set(); uniq=[]
-    for x in cands:
-        if x and x not in seen:
-            seen.add(x); uniq.append(x)
-    return uniq[:12]
-
-def select_context_image(title, article_text_or_summary):
-    entities = extract_entities(title, article_text_or_summary)
-    candidates = build_image_candidates(title, article_text_or_summary, entities)
-
-    # Wikipedia/Commons RU→EN
-    for cand in candidates:
-        for lang in ("ru", "en"):
-            url = wiki_search_image(cand, lang=lang)
-            if url:
-                img = download_image(url)
-                if img:
-                    return resize_cover(img, 1080, 540), "commons.wikimedia.org"
-
-    # Unsplash
-    kw = []
-    for e in entities[:3]:
-        kw.append(e)
-    for t in topic_wiki_titles(f"{title} {article_text_or_summary}".lower())[:3]:
-        kw.append(t)
-    img, src = unsplash_by_context(kw or ["finance","markets","economy"])
-    if img:
-        return img, src
-
-    # Picsum → Градиент
-    img, src = picsum_fallback()
-    if img: return img, src
-
-    img = Image.new("RGB",(1080,540))
-    d = ImageDraw.Draw(img)
-    top=(24,26,28); bottom=(10,12,14)
-    for y in range(540):
-        a=y/539
+# ========= ФОН: ТОЛЬКО ГРАДИЕНТ =========
+def gradient_bg(w=1080, h=540, top=(26,28,32), bottom=(10,12,16)):
+    img=Image.new("RGB",(w,h))
+    d=ImageDraw.Draw(img)
+    for y in range(h):
+        a=y/(h-1)
         r=int(top[0]*(1-a)+bottom[0]*a)
         g=int(top[1]*(1-a)+bottom[1]*a)
         b=int(top[2]*(1-a)+bottom[2]*a)
-        d.line([(0,y),(1080,y)], fill=(r,g,b))
-    return img, "gradient"
+        d.line([(0,y),(w,y)], fill=(r,g,b))
+    # лёгкая виньетка
+    vign=Image.new("L",(w,h),0)
+    vd=ImageDraw.Draw(vign)
+    vd.ellipse([-w*0.2,-h*0.5,w*1.2,h*1.5], fill=220)
+    vign=vign.filter(ImageFilter.GaussianBlur(radius=80))
+    img=Image.composite(img, Image.new("RGB",(w,h),(0,0,0)), vign)
+    return img
 
-# ========= РЕНДЕР КАРТОЧКИ =========
+# ========= РЕНДЕР КАРТОЧКИ (перенос заголовка) =========
 def wrap_text_by_width(draw, text, font, max_width, max_lines=5):
-    words = text.split()
+    words = (text or "").split()
     lines, current = [], ""
     for w in words:
         test = (current + " " + w).strip()
@@ -356,7 +191,7 @@ def wrap_text_by_width(draw, text, font, max_width, max_lines=5):
     if current and len(lines) < max_lines: lines.append(current)
     return lines
 
-def fit_title_in_box(draw, text, font_path, box_w, box_h, start_size=64, min_size=28, line_gap=8, max_lines=5):
+def fit_title_in_box(draw, text, font_path, box_w, box_h, start_size=66, min_size=28, line_gap=8, max_lines=5):
     for size in range(start_size, min_size-1, -2):
         font = ImageFont.truetype(font_path, size)
         lines = wrap_text_by_width(draw, text, font, box_w, max_lines=max_lines)
@@ -367,11 +202,9 @@ def fit_title_in_box(draw, text, font_path, box_w, box_h, start_size=64, min_siz
     lines = wrap_text_by_width(draw, text, font, box_w, max_lines=max_lines)
     return font, lines
 
-def draw_title_card(title_text, src_domain, tzname, img_source_label, base_img):
+def draw_title_card(title_text, src_domain, tzname):
     W, H = 1080, 540
-    bg = base_img.copy()
-    bg = ImageEnhance.Brightness(bg).enhance(0.9).filter(ImageFilter.GaussianBlur(radius=0.4))
-
+    bg = gradient_bg(W,H)
     overlay = Image.new("RGBA", (W, H), (0,0,0,0))
     ImageDraw.Draw(overlay).rounded_rectangle([40, 110, W-40, H-90], radius=28, fill=(0,0,0,118))
     bg = Image.alpha_composite(bg.convert("RGBA"), overlay).convert("RGB")
@@ -391,7 +224,7 @@ def draw_title_card(title_text, src_domain, tzname, img_source_label, base_img):
 
     box_x, box_y = 72, 150
     box_w, box_h = W - 2*box_x, H - box_y - 110
-    font_title, lines = fit_title_in_box(d, (title_text or "").strip(), path_bold, box_w, box_h, start_size=64, min_size=30, max_lines=5)
+    font_title, lines = fit_title_in_box(d, (title_text or "").strip(), path_bold, box_w, box_h, start_size=66, min_size=30, max_lines=5)
 
     y = box_y
     for ln in lines:
@@ -399,13 +232,11 @@ def draw_title_card(title_text, src_domain, tzname, img_source_label, base_img):
         y += font_title.getbbox("Ag")[3] + 8
 
     d.text((72, H - 58), f"source: {src_domain}", font=font_small, fill=(230,230,230))
-    img_label = f"img: {img_source_label}"
-    d.text((W - 72 - d.textlength(img_label, font=font_small), H - 58), img_label, font=font_small, fill=(230,230,230))
 
     bio = io.BytesIO(); bg.save(bio, format="PNG", optimize=True); bio.seek(0)
     return bio
 
-# ========= СКАЧИВАНИЕ ТЕКСТА СТАТЬИ =========
+# ========= СКАЧИВАНИЕ СТАТЬИ =========
 def fetch_article_text(url, max_chars=2600):
     try:
         r = requests.get(url, headers=UA, timeout=20)
@@ -419,8 +250,7 @@ def fetch_article_text(url, max_chars=2600):
             if any(x in t.lower() for x in ["javascript","cookie","подпишитесь","реклама","cookies"]): continue
             chunks.append(t)
             if sum(len(c) for c in chunks) > max_chars: break
-        text = " ".join(chunks)
-        return re.sub(r"\s+", " ", text).strip()
+        return re.sub(r"\s+", " ", " ".join(chunks)).strip()
     except Exception:
         return ""
 
@@ -448,7 +278,7 @@ def split_sentences(text):
 
 def paraphrase_sentence_ru_or_en(s):
     if detect_lang(s) == "en":
-        s = translate_en_to_ru(s)
+        s = translate_hard_ru(s)
     return ru_scientific_paraphrase(s)
 
 def one_context_emoji(context):
@@ -463,9 +293,10 @@ def one_context_emoji(context):
     return "📰"
 
 def build_three_paragraphs_scientific(title, article_text, feed_summary):
-    base = (article_text or "").strip() or (feed_summary or "").strip()
-    if detect_lang(base) == "en": base = translate_en_to_ru(base)
-    sents = [s for s in split_sentences(base) if s]
+    # Переводим всё, что не RU, ещё ДО разбиения на предложения
+    base_raw = (article_text or "").strip() or (feed_summary or "").strip()
+    base_ru = ensure_russian(base_raw)
+    sents = [s for s in split_sentences(base_ru) if s]
 
     p1_src = sents[:2] or sents[:1]
     p2_src = sents[2:5] or sents[:1]
@@ -475,11 +306,16 @@ def build_three_paragraphs_scientific(title, article_text, feed_summary):
     p2 = " ".join(paraphrase_sentence_ru_or_en(s) for s in p2_src)
     p3 = " ".join(paraphrase_sentence_ru_or_en(s) for s in p3_src)
 
-    emoji = one_context_emoji(f"{title} {base}")
+    emoji = one_context_emoji(f"{title} {base_ru}")
     return f"{emoji} {clamp(p1, 320)}", clamp(p2, 360), clamp(p3, 360)
 
 # ========= ТЕГИ: существительные, именительный падеж =========
+COUNTRY_PROPER = {
+    "россия":"Россия","сша":"США","китай":"Китай","япония":"Япония","германия":"Германия","франция":"Франция",
+    "великобритания":"Великобритания","индия":"Индия","европа":"Европа","украина":"Украина","турция":"Турция",
+}
 RU_STOP = set("это тот эта которые который которой которых также чтобы при про для на из от по как уже еще или либо чем если когда где куда весь все вся его ее их наш ваш мой твой один одна одно".split())
+
 def lemma_noun(word):
     w = word.lower()
     if MORPH:
@@ -548,7 +384,7 @@ def gen_tags_nominative(title, body, entities, max_tags=6):
             if t in COUNTRY_PROPER.values():
                 tags.append("#"+t)        # страны — с заглавной
             else:
-                tags.append("#"+t.lower())  # общие темы — строчными
+                tags.append("#"+t.lower())  # общие — строчные
     return " ".join(tags[:max_tags])
 
 # ========= КАПШЕН =========
@@ -564,6 +400,7 @@ def build_caption(title, para1, para2, para3, link, tags_str):
     if tags_str: parts += ["", tags_str]
 
     cap = "\n".join(parts)
+    # Телеграм лимит ~1024 символа у caption — компактное сжатие по необходимости:
     if len(cap) > 1024:
         over = len(cap) - 1024 + 3
         p3 = clamp(para3[:-min(over, len(para3))], 300)
@@ -625,20 +462,23 @@ def collect_entries():
 
 # ========= ОБРАБОТКА ОДНОЙ НОВОСТИ =========
 def process_item(link, title, feed_summary):
+    # Перевод заголовка на русский — гарантированно
+    title_ru = ensure_russian(title)
+    # Текст статьи
     article_text = fetch_article_text(link, max_chars=2600)
-    p1, p2, p3 = build_three_paragraphs_scientific(title, article_text, feed_summary)
+    # Абзацы (факт → детали → последствия), с гарантированным переводом
+    p1, p2, p3 = build_three_paragraphs_scientific(title_ru, article_text, ensure_russian(feed_summary))
 
     # Теги (существительные, И.п.)
-    entities_for_tags = extract_entities(title, f"{p1} {p2} {p3}")
-    tags_str = gen_tags_nominative(title, f"{p1} {p2} {p3}", entities_for_tags, max_tags=6) or "#новости"
+    entities_for_tags = extract_entities(title_ru, f"{p1} {p2} {p3}")
+    tags_str = gen_tags_nominative(title_ru, f"{p1} {p2} {p3}", entities_for_tags, max_tags=6) or "#новости"
 
-    # Фото по контексту
-    img_obj, img_src_label = select_context_image(title, article_text or feed_summary or "")
-    card = draw_title_card(title, domain(link or ""), TIMEZONE, img_src_label, img_obj)
+    # Фон — только градиент
+    card = draw_title_card(title_ru, domain(link or ""), TIMEZONE)
 
-    caption = build_caption(title, p1, p2, p3, link or "", tags_str)
+    caption = build_caption(title_ru, p1, p2, p3, link or "", tags_str)
     resp = send_photo(card, caption)
-    print(f"Posted: {title[:80]} | img={img_src_label} | tags={tags_str}")
+    print(f"Posted: {title_ru[:80]} | tags={tags_str}")
 
 # ========= MAIN =========
 def trim_posted(posted_set, keep_last=600):
