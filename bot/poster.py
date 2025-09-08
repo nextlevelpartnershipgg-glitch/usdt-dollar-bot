@@ -264,23 +264,27 @@ def build_full_caption(title, p1, p2, p3, link, hidden_tags):
     dom = (re.sub(r"^www\.", "", (link or "").split("/")[2]) if link else "источник")
     title_html = f"<b>{html_escape(title)}</b>"
 
+    # формируем тело поста
     body_plain = smart_join_and_trim([p1, p2, p3], max_len=1024-350)
     body_html  = html_escape(body_plain)
 
+    # футер (источник и канал)
     footer = [
         f'Источник: <a href="{html_escape(link)}">{html_escape(dom)}</a>',
         f'🪙 <a href="https://t.me/{CHANNEL_ID.lstrip("@")}">USDT=Dollar</a>'
     ]
-    caption = f"{title_html}\n\n{body_html}\n\n<i>{analysis_html}</i>\n\n" + "\n".join(footer)
+    caption = f"{title_html}\n\n{body_html}\n\n" + "\n".join(footer)
 
+    # скрытые теги
     if hidden_tags:
         inner = hidden_tags.strip("|")
         spoiler = f'\n\n<span class="tg-spoiler">{html_escape(inner)}</span>'
         if len(caption + spoiler) <= 1024:
             return caption + spoiler
 
+    # если текст длинный — урезаем
     if len(caption) > 1024:
-        main = smart_join_and_trim([body_plain, analysis_plain], max_len=1024 - 100 - len("\n".join(footer)))
+        main = smart_join_and_trim([body_plain], max_len=1024 - 100 - len("\n".join(footer)))
         caption = f"{title_html}\n\n{html_escape(main)}\n\n" + "\n".join(footer)
     return caption
 
