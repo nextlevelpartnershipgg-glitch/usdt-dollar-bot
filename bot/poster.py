@@ -379,20 +379,26 @@ def fetch_article_text(url, max_chars=2600):
         return ""
 
 def build_three_paragraphs_scientific(title, article_text, feed_summary):
-    base_raw=(article_text or "").strip() or (feed_summary or "").strip()
-    base_ru=ensure_russian(base_raw)
-    sents=[s for s in split_sentences(base_ru) if s]
-    p1_src=sents[:2] or sents[:1]
-    p2_src=sents[2:5] or sents[:1]
-    p3_src=sents[5:8] or sents[1:3] or sents[:1]
-    p1=" ".join(paraphrase_sentence_ru_or_en(s) for s in p1_src)
-    p2=" ".join(paraphrase_sentence_ru_or_en(s) for s in p2_src)
-    p3=" ".join(paraphrase_sentence_ru_or_en(s) for s in p3_src)
+    base_raw = (article_text or "").strip() or (feed_summary or "").strip()
+    base_ru = ensure_russian(base_raw)
+
+    sents = [s for s in split_sentences(base_ru) if s]
+    p1_src = sents[:2] or sents[:1]
+    p2_src = sents[2:5] or sents[:1]
+    p3_src = sents[5:8] or sents[1:3] or sents[:1]
+
+    p1 = " ".join(paraphrase_sentence_ru_or_en(s) for s in p1_src)
+    p2 = " ".join(paraphrase_sentence_ru_or_en(s) for s in p2_src)
+    p3 = " ".join(paraphrase_sentence_ru_or_en(s) for s in p3_src)
+
     emoji = one_context_emoji(f"{title} {base_ru}")
-p1 = tidy_paragraph(f"{emoji} {p1}".strip())
-p2 = tidy_paragraph(p2.strip())
-p3 = tidy_paragraph(p3.strip())
-return p1, p2, p3
+
+    # Аккуратим абзацы: заглавная буква, баланс скобок/кавычек
+    p1 = tidy_paragraph(f"{emoji} {p1}".strip())
+    p2 = tidy_paragraph(p2.strip())
+    p3 = tidy_paragraph(p3.strip())
+
+    return p1, p2, p3
 
 # ========= Рендер карточки =========
 def wrap_text_by_width(draw, text, font, max_width, max_lines=5):
