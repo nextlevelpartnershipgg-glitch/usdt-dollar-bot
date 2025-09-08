@@ -15,7 +15,7 @@ CHANNEL_NAME   = os.environ.get("CHANNEL_NAME", "USDT=Dollar")
 CHANNEL_HANDLE = os.environ.get("CHANNEL_HANDLE", "@usdtdollarm")
 CHANNEL_LINK   = os.environ.get("CHANNEL_LINK", f"https://t.me/{CHANNEL_HANDLE.lstrip('@')}")
 
-MAX_POSTS_PER_RUN  = int(os.environ.get("MAX_POSTS_PER_RUN", "1"))    # 1 за прогон → ровно каждые 10 минут 1 пост
+MAX_POSTS_PER_RUN  = int(os.environ.get("MAX_POSTS_PER_RUN", "1"))  # 1 пост за прогон
 LOOKBACK_MINUTES   = int(os.environ.get("LOOKBACK_MINUTES", "30"))
 FRESH_WINDOW_MIN   = int(os.environ.get("FRESH_WINDOW_MIN", "25"))
 MIN_EVENT_YEAR     = int(os.environ.get("MIN_EVENT_YEAR", "2023"))
@@ -89,7 +89,7 @@ def load_state():
     return {}
 
 def save_state(state):
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8"))
+    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def load_history():
     if HISTORY_FILE.exists():
@@ -177,12 +177,10 @@ def extract_entities(title, summary):
     companies = [c for c in COMPANY_HINTS if c.lower() in text.lower()]
     stop = {"The","This"}
     names = [x for x in names if x not in stop and len(x) > 2]
-    out = []
-    out += names[:5]; out += companies[:5]; out += tickers[:5]
+    out = []; out += names[:5]; out += companies[:5]; out += tickers[:5]
     seen=set(); uniq=[]
     for x in out:
-        if x not in seen:
-            seen.add(x); uniq.append(x)
+        if x not in seen: seen.add(x); uniq.append(x)
     return uniq or ["рынки","экономика"]
 
 # ====== Градиент (случайный, +30% яркости/контраста) ======
@@ -274,7 +272,7 @@ def build_three_paragraphs_scientific(title, article_text, feed_summary):
     p2=" ".join(paraphrase_sentence_ru_or_en(s) for s in p2_src)
     p3=" ".join(paraphrase_sentence_ru_or_en(s) for s in p3_src)
     emoji=one_context_emoji(f"{title} {base_ru}")
-    return f"{clamp(emoji + ' ' + p1, 320)}", clamp(p2, 360), clamp(p3, 360)
+    return clamp(f"{emoji} {p1}", 320), clamp(p2, 360), clamp(p3, 360)
 
 # ====== Теги (скрытые 3–5; И.п.) ======
 COUNTRY_PROPER={"россия":"Россия","сша":"США","китай":"Китай","япония":"Япония","германия":"Германия","франция":"Франция",
@@ -477,14 +475,11 @@ def process_item(item, now_utc):
     card=draw_title_card(title_ru, domain(link or ""), TIMEZONE, event_dt, now_utc)
     caption=build_caption(title_ru, p1,p2,p3, link or "", hidden_tags, event_dt, now_utc)
     resp=send_photo(card, caption)
-    # лог для дайджеста
-    hist = load_history()
-    hist.append({
+    append_history({
         "uid": item["uid"], "title": title_ru, "link": link,
         "event_utc": event_dt.isoformat(), "posted_utc": now_utc.isoformat(),
         "tags": hidden_tags
     })
-    HISTORY_FILE.write_text(json.dumps(hist, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"Posted: {title_ru[:80]} | event={event_dt.isoformat()}")
     return resp
 
@@ -517,7 +512,7 @@ def main():
         except Exception as e:
             print("Error sending:", e)
     state["posted_uids"]=list(trim_posted(posted))
-    STATE_FILE.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    save_state(state)
 
 if __name__=="__main__":
     main()
