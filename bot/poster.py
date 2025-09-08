@@ -221,6 +221,53 @@ def translate_hard_ru(text: str, timeout=14) -> str:
 def ensure_russian(text: str) -> str:
     return translate_hard_ru(text) if detect_lang(text) == "en" else text
 
+
+# ===== Короткий аналитический вывод (1–2 фразы, без домыслов) =====
+def _sentiment_hint(text: str) -> str:
+    t = (text or "").lower()
+    neg = any(k in t for k in [
+        "паден", "снижен", "сокращ", "штраф", "санкц", "убыт", "дефиц",
+        "отзыв", "кризис", "неустойчив", "замедлен"
+    ])
+    pos = any(k in t for k in [
+        "рост", "увелич", "расшир", "рекорд", "одобрен", "прибыл",
+        "планирует", "ускорен", "улучшен", "повышен"
+    ])
+    if pos and not neg:
+        return "нейтрально-позитивная"
+    if neg and not pos:
+        return "нейтрально-негативная"
+    return "нейтральная"
+
+def generate_brief_analysis(title_ru: str, p1: str, p2: str, p3: str) -> str:
+    """
+    Делает короткий вывод по фактам из текста (без новых сведений).
+    Тон: деловой/нейтральный. 1–2 предложения.
+    """
+    body = " ".join([p1 or "", p2 or "", p3 or ""])
+    mood = _sentiment_hint(body)
+
+    # базовая тема по ключам
+    topic = "рынок"
+    tl = (title_ru + " " + body).lower()
+    if any(w in tl for w in ["ставк", "цб", "фрс", "инфляц"]):
+        topic = "денежно-кредитная политика"
+    elif any(w in tl for w in ["нефть", "газ", "opec", "брент", "энерги", "lng"]):
+        topic = "энергетика"
+    elif any(w in tl for w in ["акци", "бирж", "индекс", "nasdaq", "moex", "s&p", "облигац"]):
+        topic = "финансовые рынки"
+    elif any(w in tl for w in ["крипт", "биткоин", "bitcoin", "eth", "стейбл"]):
+        topic = "крипторынок"
+    elif any(w in tl for w in ["бюджет", "налог", "минфин", "расход", "доход"]):
+        topic = "госфинансы"
+    elif any(w in tl for w in ["ввп", "безработ", "делов", "производств", "экспорт", "импорт"]):
+        topic = "макроэкономика"
+
+    a1 = f"Итог ({topic}, {mood}): формально описанное событие отражает текущую динамику без добавления новых рисков."
+    a2 = "Критично наблюдать за следующими релизами и официальными комментариями для подтверждения тренда."
+    return a1 + " " + a2
+
+
 # ========= Сущности/теги =========
 COMPANY_HINTS = ["Apple","Microsoft","Tesla","Meta","Google","Alphabet","Amazon","Nvidia","Samsung","Intel","Huawei",
                  "Газпром","Сбербанк","Яндекс","Роснефть","Лукойл","Норникель","Татнефть","Новатэк","ВТБ","Сургутнефтегаз"]
