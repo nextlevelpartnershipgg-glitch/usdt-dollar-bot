@@ -1,9 +1,11 @@
-name: Digest (every 8 hours)
+name: Digest (08:00, 16:00, 00:00 MSK)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 */8 * * *"   # каждые 8 часов (UTC)
+    - cron: "0 5 * * *"    # 08:00 по Москве (UTC+3 => 05:00 UTC)
+    - cron: "0 13 * * *"   # 16:00 по Москве
+    - cron: "0 21 * * *"   # 00:00 по Москве
 
 concurrency:
   group: digest
@@ -13,6 +15,7 @@ jobs:
   run-digest:
     runs-on: ubuntu-latest
     timeout-minutes: 6
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
