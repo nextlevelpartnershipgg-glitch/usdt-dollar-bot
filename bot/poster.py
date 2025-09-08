@@ -500,10 +500,26 @@ def main():
     fresh_cutoff=now_utc - timedelta(minutes=FRESH_WINDOW_MIN)
     fresh=[it for it in items if it["dt"]>=fresh_cutoff and it["dt"]>=lookback_dt and it["uid"] not in posted]
     fresh.sort(key=lambda x: x["dt"], reverse=True)
-    to_post=fresh[:MAX_POSTS_PER_RUN]
-    if not to_post:
-        print("Nothing new in fresh window.")
+    to_post = fresh[:MAX_POSTS_PER_RUN]
+
+# --- Фолбэк: если в окне свежести ничего нет, берём самое новое за последние N минут ---
+FALLBACK_ON_NO_FRESH = os.environ.get("FALLBACK_ON_NO_FRESH", "1") == "1"
+FALLBACK_WINDOW_MIN  = int(os.environ.get("FALLBACK_WINDOW_MIN", "360"))  # по умолчанию 6 часов
+
+if not to_post and FALLBACK_ON_NO_FRESH:
+    fallback_cutoff = now_utc - timedelta(minutes=FALLBACK_WINDOW_MIN)
+    candidates = [it for it in items if it["uid"] not in posted and it["dt"] >= fallback_cutoff]
+    candidates.sort(key=lambda x: x["dt"], reverse=True)
+    to_post = candidates[:MAX_POSTS_PER_RUN]
+    if to_post:
+        print(f"Fallback used: took newest item(s) within {FALLBACK_WINDOW_MIN} min.")
+    else:
+        print("Nothing to post even with fallback window.")
         return
+
+if not to_post:
+    print("Nothing new in fresh window.")
+    return
     for it in to_post:
         try:
             process_item(it, now_utc)
