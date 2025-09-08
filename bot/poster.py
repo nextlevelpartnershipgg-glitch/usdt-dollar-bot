@@ -20,13 +20,17 @@ LOOKBACK_MINUTES   = int(os.environ.get("LOOKBACK_MINUTES", "30"))
 FRESH_WINDOW_MIN   = int(os.environ.get("FRESH_WINDOW_MIN", "25"))
 MIN_EVENT_YEAR     = int(os.environ.get("MIN_EVENT_YEAR", "2023"))
 
+# фолбэк: если свежих нет — взять самое новое за N минут
+FALLBACK_ON_NO_FRESH = os.environ.get("FALLBACK_ON_NO_FRESH", "1") == "1"
+FALLBACK_WINDOW_MIN  = int(os.environ.get("FALLBACK_WINDOW_MIN", "360"))  # 6 часов
+
 DATA_DIR = pathlib.Path("data"); DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE   = DATA_DIR / "state.json"
 HISTORY_FILE = DATA_DIR / "history.json"   # для дайджестов
 
-UA  = {"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
+UA = {"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
 
-# ====== ИСТОЧНИКИ (≥30, РФ-фокус; без РИА) ======
+# ====== ИСТОЧНИКИ (≥30 РФ + мир; без РИА) ======
 RSS_FEEDS_RU = [
     "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
     "https://rssexport.rbc.ru/rbcnews/economics/30/full.rss",
@@ -166,7 +170,7 @@ def translate_hard_ru(text: str, timeout=14) -> str:
 def ensure_russian(text: str) -> str:
     return translate_hard_ru(text) if detect_lang(text) == "en" else text
 
-# ====== Сущности для тегов ======
+# ====== Сущности и теги ======
 COMPANY_HINTS = ["Apple","Microsoft","Tesla","Meta","Google","Alphabet","Amazon","Nvidia","Samsung","Intel","Huawei",
                  "Газпром","Сбербанк","Яндекс","Роснефть","Лукойл","Норникель","Татнефть","Новатэк","ВТБ","Сургутнефтегаз"]
 TICKER_PAT = re.compile(r"\b[A-Z]{2,6}\b")
@@ -182,6 +186,67 @@ def extract_entities(title, summary):
     for x in out:
         if x not in seen: seen.add(x); uniq.append(x)
     return uniq or ["рынки","экономика"]
+
+COUNTRY_PROPER={"россия":"Россия","сша":"США","китай":"Китай","япония":"Япония","германия":"Германия","франция":"Франция",
+                "великобритания":"Великобритания","индия":"Индия","европа":"Европа","украина":"Украина","турция":"Турция"}
+RU_STOP=set("это тот эта которые который которой которых также чтобы при про для на из от по как уже еще или либо чем если когда где куда весь все вся его ее их наш ваш мой твой один одна одно".split())
+def lemma_noun(word):
+    w=word.lower()
+    if MORPH:
+        p=MORPH.parse(w)[0]
+        if "NOUN" in p.tag:
+            nf=p.normal_form
+            return COUNTRY_PROPER.get(nf, nf)
+    return w
+def extract_candidate_nouns(text, entities, limit=12):
+    words=re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", text)
+    candidates=[]
+    for w in words:
+        wl=w.lower()
+        if wl in RU_STOP: continue
+        candidates.append(wl)
+    for e in entities:
+        if re.fullmatch(r"[A-Z]{2,6}", e): candidates.append(e)
+        else: candidates += e.split()
+    lemmas=[]
+    for c in candidates:
+        if re.fullmatch(r"[A-Z]{2,6}", c): lemmas.append(c)
+        else:
+            l=lemma_noun(c)
+            if l and len(l)>=3: lemmas.append(l)
+    freq={}
+    for l in lemmas: freq[l]=freq.get(l,0)+1
+    out=[k for k,_ in sorted(freq.items(), key=lambda x: -x[1])]
+    out=[re.sub(r"[^A-Za-zА-Яа-яЁё0-9]","",x) for x in out]
+    out=[x for x in out if x and x.lower() not in RU_STOP]
+    return out[:limit]
+def gen_hidden_tags(title, body, entities, min_tags=3, max_tags=5):
+    text_l=(title+" "+body).lower()
+    thematic=[]
+    def tadd(x):
+        if x not in thematic: thematic.append(x)
+    if any(k in text_l for k in ["биткоин","bitcoin","btc","крипт","ethereum","eth","stablecoin"]): tadd("крипта")
+    if any(k in text_l for k in ["доллар","usd","евро","eur","рубл","rub","юань","cny","курс","форекс"]): tadd("валюта")
+    if any(k in text_l for k in ["акци","рынок","бирж","индекс","nasdaq","nyse","s&p","sp500","dow"]): tadd("рынки")
+    if any(k in text_l for k in ["ставк","фрс","цб","инфляц","cpi","ppi","qe","qt"]): tadd("ставки")
+    if any(k in text_l for k in ["нефть","брент","wti","opec","газ","энерги","lng"]): tadd("энергетика")
+    if any(k in text_l for k in ["санкц","эмбарго","пошлин","геополит","переговор","президент"]): tadd("геополитика")
+    nouns=extract_candidate_nouns(title+" "+body, entities, limit=12)
+    result=[]
+    def add(s):
+        if s and s not in result: result.append(s)
+    for t in thematic: add(t)
+    for n in nouns: add(COUNTRY_PROPER.get(n.lower(), n))
+    tags=[]
+    for t in result:
+        if re.fullmatch(r"[A-Z]{2,6}", t): tags.append("#"+t)
+        else: tags.append("#"+(t if t in COUNTRY_PROPER.values() else t.lower()))
+        if len(tags)>=max_tags: break
+    if len(tags)<min_tags:
+        for extra in ["#рынки","#валюта","#крипта","#ставки","#энергетика","#геополитика"]:
+            if extra not in tags: tags.append(extra)
+            if len(tags)>=min_tags: break
+    return "||"+" ".join(tags[:max_tags])+"||"
 
 # ====== Градиент (случайный, +30% яркости/контраста) ======
 PALETTES = [((32,44,80),(12,16,28)),((16,64,88),(8,20,36)),((82,30,64),(14,12,24)),
@@ -219,11 +284,9 @@ def ru_scientific_paraphrase(s):
     for pat,repl in RU_TONE_REWRITE: out=re.sub(pat,repl,out,flags=re.IGNORECASE)
     out=re.sub(r"\s+%","%",out)
     return re.sub(r"\s+"," ",out).strip()
-
 def split_sentences(text):
     text=re.sub(r"\s+"," ",text or "").strip()
     return re.split(r"(?<=[.!?])\s+", text) if text else []
-
 def paraphrase_sentence_ru_or_en(s):
     if detect_lang(s)=="en":
         s=translate_hard_ru(s)
@@ -274,71 +337,7 @@ def build_three_paragraphs_scientific(title, article_text, feed_summary):
     emoji=one_context_emoji(f"{title} {base_ru}")
     return clamp(f"{emoji} {p1}", 320), clamp(p2, 360), clamp(p3, 360)
 
-# ====== Теги (скрытые 3–5; И.п.) ======
-COUNTRY_PROPER={"россия":"Россия","сша":"США","китай":"Китай","япония":"Япония","германия":"Германия","франция":"Франция",
-                "великобритания":"Великобритания","индия":"Индия","европа":"Европа","украина":"Украина","турция":"Турция"}
-RU_STOP=set("это тот эта которые который которой которых также чтобы при про для на из от по как уже еще или либо чем если когда где куда весь все вся его ее их наш ваш мой твой один одна одно".split())
-def lemma_noun(word):
-    w=word.lower()
-    if MORPH:
-        p=MORPH.parse(w)[0]
-        if "NOUN" in p.tag:
-            nf=p.normal_form
-            return COUNTRY_PROPER.get(nf, nf)
-    return w
-
-def extract_candidate_nouns(text, entities, limit=12):
-    words=re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", text)
-    candidates=[]
-    for w in words:
-        wl=w.lower()
-        if wl in RU_STOP: continue
-        candidates.append(wl)
-    for e in entities:
-        if re.fullmatch(r"[A-Z]{2,6}", e): candidates.append(e)
-        else: candidates += e.split()
-    lemmas=[]
-    for c in candidates:
-        if re.fullmatch(r"[A-Z]{2,6}", c): lemmas.append(c)
-        else:
-            l=lemma_noun(c)
-            if l and len(l)>=3: lemmas.append(l)
-    freq={}
-    for l in lemmas: freq[l]=freq.get(l,0)+1
-    out=[k for k,_ in sorted(freq.items(), key=lambda x: -x[1])]
-    out=[re.sub(r"[^A-Za-zА-Яа-яЁё0-9]","",x) for x in out]
-    out=[x for x in out if x and x.lower() not in RU_STOP]
-    return out[:limit]
-
-def gen_hidden_tags(title, body, entities, min_tags=3, max_tags=5):
-    text_l=(title+" "+body).lower()
-    thematic=[]
-    def tadd(x):
-        if x not in thematic: thematic.append(x)
-    if any(k in text_l for k in ["биткоин","bitcoin","btc","крипт","ethereum","eth","stablecoin"]): tadd("крипта")
-    if any(k in text_l for k in ["доллар","usd","евро","eur","рубл","rub","юань","cny","курс","форекс"]): tadd("валюта")
-    if any(k in text_l for k in ["акци","рынок","бирж","индекс","nasdaq","nyse","s&p","sp500","dow"]): tadd("рынки")
-    if any(k in text_l for k in ["ставк","фрс","цб","инфляц","cpi","ppi","qe","qt"]): tadd("ставки")
-    if any(k in text_l for k in ["нефть","брент","wti","opec","газ","энерги","lng"]): tadd("энергетика")
-    if any(k in text_l for k in ["санкц","эмбарго","пошлин","геополит","переговор","президент"]): tadd("геополитика")
-    nouns=extract_candidate_nouns(title+" "+body, entities, limit=12)
-    result=[]
-    def add(s):
-        if s and s not in result: result.append(s)
-    for t in thematic: add(t)
-    for n in nouns: add(COUNTRY_PROPER.get(n.lower(), n))
-    tags=[]
-    for t in result:
-        if re.fullmatch(r"[A-Z]{2,6}", t): tags.append("#"+t)
-        else: tags.append("#"+(t if t in COUNTRY_PROPER.values() else t.lower()))
-        if len(tags)>=max_tags: break
-    if len(tags)<min_tags:
-        for extra in ["#рынки","#валюта","#крипта","#ставки","#энергетика","#геополитика"]:
-            if extra not in tags: tags.append(extra)
-            if len(tags)>=min_tags: break
-    return "||"+" ".join(tags[:max_tags])+"||"
-
-# ====== Рендер карточки (время события/поста) ======
+# ====== Рендер карточки ======
 def wrap_text_by_width(draw, text, font, max_width, max_lines=5):
     words=(text or "").split(); lines=[]; cur=""
     for w in words:
@@ -351,7 +350,6 @@ def wrap_text_by_width(draw, text, font, max_width, max_lines=5):
             cur=w
     if cur and len(lines)<max_lines: lines.append(cur)
     return lines
-
 def fit_title_in_box(draw, text, font_path, box_w, box_h, start=66, min_s=28, line_gap=8, max_lines=5):
     for size in range(start, min_s-1, -2):
         font=ImageFont.truetype(font_path,size)
@@ -361,7 +359,6 @@ def fit_title_in_box(draw, text, font_path, box_w, box_h, start=66, min_s=28, li
     font=ImageFont.truetype(font_path,min_s)
     lines=wrap_text_by_width(draw,text,font,box_w,max_lines=max_lines)
     return font,lines
-
 def draw_title_card(title_text, src_domain, tzname, event_dt_utc, post_dt_utc):
     W,H=1080,540
     bg=random_gradient(W,H)
@@ -369,38 +366,27 @@ def draw_title_card(title_text, src_domain, tzname, event_dt_utc, post_dt_utc):
     ImageDraw.Draw(overlay).rounded_rectangle([40,110,W-40,H-90], radius=28, fill=(0,0,0,118))
     bg=Image.alpha_composite(bg.convert("RGBA"),overlay).convert("RGB")
     d=ImageDraw.Draw(bg)
-
     path_bold="/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
     path_reg ="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     f_brand=ImageFont.truetype(path_bold,34)
     f_time =ImageFont.truetype(path_reg,22)
     f_small=ImageFont.truetype(path_reg,20)
-
     d.text((48,26),CHANNEL_NAME,fill=(255,255,255),font=f_brand)
-
     try: tz=ZoneInfo(tzname)
     except Exception: tz=ZoneInfo("UTC")
     ev=event_dt_utc.astimezone(tz).strftime("%d.%m %H:%M")
     po=post_dt_utc.astimezone(tz).strftime("%d.%m %H:%M")
-
     right=f"пост: {po}"
     d.text((W-48-d.textlength(right,font=f_time),28),right,fill=(255,255,255),font=f_time)
-
     box_x,box_y=72,150
     box_w,box_h=W-2*box_x, H-box_y-120
     f_title,lines=fit_title_in_box(d,(title_text or "").strip(),path_bold,box_w,box_h, start=66,min_s=30,max_lines=5)
-
     y=box_y
     for ln in lines:
         d.text((box_x,y),ln,font=f_title,fill=(255,255,255))
         y+=f_title.getbbox("Ag")[3]+8
-
     d.text((72,H-64),f"source: {src_domain}  •  событие: {ev}",font=f_small,fill=(230,230,230))
-
-    bio=io.BytesIO()
-    bg.save(bio,format="PNG",optimize=True)
-    bio.seek(0)
-    return bio
+    bio=io.BytesIO(); bg.save(bio,format="PNG",optimize=True); bio.seek(0); return bio
 
 # ====== Подпись ======
 def build_caption(title, p1,p2,p3, link, hidden_tags, event_dt_utc, post_dt_utc):
@@ -500,26 +486,25 @@ def main():
     fresh_cutoff=now_utc - timedelta(minutes=FRESH_WINDOW_MIN)
     fresh=[it for it in items if it["dt"]>=fresh_cutoff and it["dt"]>=lookback_dt and it["uid"] not in posted]
     fresh.sort(key=lambda x: x["dt"], reverse=True)
+
     to_post = fresh[:MAX_POSTS_PER_RUN]
 
-# --- Фолбэк: если в окне свежести ничего нет, берём самое новое за последние N минут ---
-FALLBACK_ON_NO_FRESH = os.environ.get("FALLBACK_ON_NO_FRESH", "1") == "1"
-FALLBACK_WINDOW_MIN  = int(os.environ.get("FALLBACK_WINDOW_MIN", "360"))  # по умолчанию 6 часов
+    # --- Фолбэк: если свежих нет, берём самое новое за последние N минут ---
+    if not to_post and FALLBACK_ON_NO_FRESH:
+        fallback_cutoff = now_utc - timedelta(minutes=FALLBACK_WINDOW_MIN)
+        candidates = [it for it in items if it["uid"] not in posted and it["dt"] >= fallback_cutoff]
+        candidates.sort(key=lambda x: x["dt"], reverse=True)
+        to_post = candidates[:MAX_POSTS_PER_RUN]
+        if to_post:
+            print(f"Fallback used: took newest item(s) within {FALLBACK_WINDOW_MIN} min.")
+        else:
+            print("Nothing to post even with fallback window.")
+            return
 
-if not to_post and FALLBACK_ON_NO_FRESH:
-    fallback_cutoff = now_utc - timedelta(minutes=FALLBACK_WINDOW_MIN)
-    candidates = [it for it in items if it["uid"] not in posted and it["dt"] >= fallback_cutoff]
-    candidates.sort(key=lambda x: x["dt"], reverse=True)
-    to_post = candidates[:MAX_POSTS_PER_RUN]
-    if to_post:
-        print(f"Fallback used: took newest item(s) within {FALLBACK_WINDOW_MIN} min.")
-    else:
-        print("Nothing to post even with fallback window.")
+    if not to_post:
+        print("Nothing new in fresh window.")
         return
 
-if not to_post:
-    print("Nothing new in fresh window.")
-    return
     for it in to_post:
         try:
             process_item(it, now_utc)
@@ -527,6 +512,7 @@ if not to_post:
             time.sleep(1.0)
         except Exception as e:
             print("Error sending:", e)
+
     state["posted_uids"]=list(trim_posted(posted))
     save_state(state)
 
