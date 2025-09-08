@@ -7,7 +7,7 @@ from bs4 import BeautifulSoup
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
 from zoneinfo import ZoneInfo
 
-# ====== НАСТРОЙКИ ======
+# ========= НАСТРОЙКИ =========
 BOT_TOKEN  = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID", "@usdtdollarm")
 TIMEZONE   = os.environ.get("TIMEZONE", "Europe/Moscow")
@@ -21,7 +21,6 @@ LOOKBACK_MINUTES   = int(os.environ.get("LOOKBACK_MINUTES", "30"))
 FRESH_WINDOW_MIN   = int(os.environ.get("FRESH_WINDOW_MIN", "25"))
 MIN_EVENT_YEAR     = int(os.environ.get("MIN_EVENT_YEAR", "2023"))
 
-# фолбэк и «всегда постить»
 FALLBACK_ON_NO_FRESH = os.environ.get("FALLBACK_ON_NO_FRESH", "1") == "1"
 FALLBACK_WINDOW_MIN  = int(os.environ.get("FALLBACK_WINDOW_MIN", "360"))  # 6 часов
 ALWAYS_POST          = os.environ.get("ALWAYS_POST", "1") == "1"
@@ -32,7 +31,7 @@ HISTORY_FILE = DATA_DIR / "history.json"
 
 UA = {"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
 
-# ====== ИСТОЧНИКИ (РФ + мир; без РИА) ======
+# ========= ИСТОЧНИКИ (РФ + мир; без РИА) =========
 RSS_FEEDS_RU = [
     "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
     "https://rssexport.rbc.ru/rbcnews/economics/30/full.rss",
@@ -60,7 +59,7 @@ RSS_FEEDS_RU = [
     "https://www.mskagency.ru/rss/all",
     "https://www.ng.ru/rss/",
     "https://www.mk.ru/rss/finance/index.xml",
-    "https://www.комmersant.ru/RSS/regions.xml".replace("ком","kom"),  # безопасно
+    "https://www.kommersant.ru/RSS/regions.xml",
     "https://www.kommersant.ru/RSS/tech.xml",
     "https://www.fontanka.ru/fontanka.rss",
     "https://minfin.gov.ru/ru/press-center/?rss=Y",
@@ -81,14 +80,14 @@ RSS_FEEDS_WORLD = [
 ]
 RSS_FEEDS = RSS_FEEDS_RU + RSS_FEEDS_WORLD
 
-# ====== Pymorphy для тегов ======
+# ========= Pymorphy (опционально) =========
 try:
     import pymorphy2
     MORPH = pymorphy2.MorphAnalyzer()
 except Exception:
     MORPH = None
 
-# ====== Утилиты ======
+# ========= Утилиты =========
 def load_state():
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -131,7 +130,7 @@ def clamp(s, n):
     s = (s or "").strip()
     return s if len(s) <= n else s[:n-1] + "…"
 
-# ====== Перевод EN→RU ======
+# ========= Перевод EN→RU =========
 def detect_lang(text: str) -> str:
     if re.search(r"[А-Яа-яЁё]", text): return "ru"
     en_hits = len(re.findall(r"\b(the|and|of|to|in|for|on|with|from|by|as|at|is|are|this|that|it|was|be)\b", text.lower()))
@@ -172,7 +171,7 @@ def translate_hard_ru(text: str, timeout=14) -> str:
 def ensure_russian(text: str) -> str:
     return translate_hard_ru(text) if detect_lang(text) == "en" else text
 
-# ====== Сущности/теги ======
+# ========= Сущности/теги =========
 COMPANY_HINTS = ["Apple","Microsoft","Tesla","Meta","Google","Alphabet","Amazon","Nvidia","Samsung","Intel","Huawei",
                  "Газпром","Сбербанк","Яндекс","Роснефть","Лукойл","Норникель","Татнефть","Новатэк","ВТБ","Сургутнефтегаз"]
 TICKER_PAT = re.compile(r"\b[A-Z]{2,6}\b")
@@ -250,7 +249,7 @@ def gen_hidden_tags(title, body, entities, min_tags=3, max_tags=5):
             if len(tags)>=min_tags: break
     return "||"+" ".join(tags[:max_tags])+"||"
 
-# ====== Градиент (ярче на ~30%) ======
+# ========= Градиент (ярче ~30%) =========
 PALETTES = [((32,44,80),(12,16,28)),((16,64,88),(8,20,36)),((82,30,64),(14,12,24)),
             ((20,88,72),(8,24,22)),((90,60,22),(20,16,12)),((44,22,90),(16,12,32)),((24,26,32),(12,14,18))]
 def _boost(c, factor=1.3): return tuple(max(0, min(255, int(v*factor))) for v in c)
@@ -277,7 +276,7 @@ def random_gradient(w=1080, h=540):
     img = Image.composite(img, Image.new("RGB",(w,h),(0,0,0)), mask)
     return img
 
-# ====== Рерайт и парсинг ======
+# ========= Рерайт/парсинг =========
 RU_TONE_REWRITE=[(r"\bсказал(а|и)?\b","сообщил\\1"),(r"\bзаявил(а|и)?\b","отметил\\1"),
                  (r"\bпо словам\b","по данным"),(r"\bпо мнению\b","согласно оценкам"),
                  (r"\bпримерно\b","порядка"),(r"\bочень\b","существенно"),(r"\bсильно\b","значительно")]
@@ -337,9 +336,9 @@ def build_three_paragraphs_scientific(title, article_text, feed_summary):
     p2=" ".join(paraphrase_sentence_ru_or_en(s) for s in p2_src)
     p3=" ".join(paraphrase_sentence_ru_or_en(s) for s in p3_src)
     emoji=one_context_emoji(f"{title} {base_ru}")
-    return clamp(f"{emoji} {p1}", 320), clamp(p2, 360), clamp(p3, 360)
+    return f"{emoji} {p1}".strip(), p2.strip(), p3.strip()
 
-# ====== Рендер карточки ======
+# ========= Рендер карточки =========
 def wrap_text_by_width(draw, text, font, max_width, max_lines=5):
     words=(text or "").split(); lines=[]; cur=""
     for w in words:
@@ -390,48 +389,68 @@ def draw_title_card(title_text, src_domain, tzname, event_dt_utc, post_dt_utc):
     d.text((72,H-64),f"source: {src_domain}  •  событие: {ev}",font=f_small,fill=(230,230,230))
     bio=io.BytesIO(); bg.save(bio,format="PNG",optimize=True); bio.seek(0); return bio
 
-# ====== Подпись к ОДНОМУ сообщению (без кликабельного URL) ======
-def build_full_caption(title, p1, p2, p3, link, hidden_tags, event_dt_utc, post_dt_utc):
-    title = clamp(title, 200)
-    tz = ZoneInfo(TIMEZONE)
-    ev = event_dt_utc.astimezone(tz).strftime("%d.%m %H:%M")
-    po = post_dt_utc.astimezone(tz).strftime("%d.%m %H:%M")
-    dom = root_domain(link) if link else "источник"
+# ========= MarkdownV2: экранирование и умное обрезание =========
+MDV2_ESCAPE = r'[_\*\[\]\(\)~`>#+\-=\{\}\.\!]'
+def escape_mdv2(text: str) -> str:
+    # не экранируем # (пусть хэштеги работают) и | (нужны для спойлеров)
+    # экранируем остальные спец-символы MarkdownV2
+    return re.sub(MDV2_ESCAPE, lambda m: "\\" + m.group(0), text)
 
-    # ВНИМАНИЕ: ставим домен БЕЗ URL, чтобы Telegram не делал web-preview
-    parts = [
-        f"*{title}*",
-        "",
-        f"{p1}\n\n{p2}\n\n{p3}",
-        "",
-        f"Время события: {ev}  •  Время поста: {po}",
-        "",
-        f"Источник: {dom}",
-        "",
-        f"🪙 [{CHANNEL_NAME}]({CHANNEL_LINK})",
+def smart_join_and_trim(paragraphs, max_len=1024):
+    """
+    Склеиваем параграфы и, если нужно, обрезаем по границе предложения,
+    чтобы не рвать текст. Лимит — под Telegram caption (~1024).
+    """
+    raw = "\n\n".join([p for p in paragraphs if p])
+    if len(raw) <= max_len:
+        return raw
+    # обрежем на ближайшей границе предложения до лимита
+    cut = raw[:max_len]
+    m = re.findall(r"[.!?…]\s", cut)
+    if m:
+        # берем последнюю точку/границу
+        last = max(cut.rfind(x) for x in [". ", "! ", "? ", "… ", ".\n", "!\n", "?\n", "…\n"] if cut.rfind(x) != -1)
+        if last != -1:
+            return cut[:last+1].rstrip()
+    # если границы нет — мягко обрежем и добавим многоточие
+    return cut[:-1].rstrip() + "…"
+
+# ========= Подпись к одному сообщению =========
+def build_full_caption(title, p1, p2, p3, link, hidden_tags):
+    dom = root_domain(link) if link else "источник"
+    # экранируем заголовок для MarkdownV2 и делаем жирным
+    title_esc = escape_mdv2(title)
+    title_line = f"*{title_esc}*"
+
+    # текст без времени (оно на карточке)
+    body_plain = smart_join_and_trim([p1, p2, p3], max_len=1024 - 200)  # оставим запас под хвост
+    body_esc = escape_mdv2(body_plain)
+
+    footer_lines = [
+        f"Источник: {escape_mdv2(dom)}",
+        f"🪙 [{escape_mdv2(CHANNEL_NAME)}]({escape_mdv2(CHANNEL_LINK)})"
     ]
+    text_no_tags = "\n\n".join([title_line, body_esc, "", "\n".join(footer_lines)])
+    # проверим общий размер с тегами
     if hidden_tags:
-        parts += ["", hidden_tags]  # останутся «как есть» (не спойлер), по твоему текущему формату
-    text = "\n".join(parts)
-    if len(text) > 1024:
-        over = len(text) - 1024 + 3
-        p3 = clamp(p3[:-min(over, len(p3))], 300)
-        parts[2] = f"{p1}\n\n{p2}\n\n{p3}"
-        text = "\n".join(parts)
-    return text
+        if len(text_no_tags) + 2 + len(hidden_tags) <= 1024:
+            return text_no_tags + "\n\n" + hidden_tags
+        else:
+            return text_no_tags  # если не помещается — теги отбросим
+    return text_no_tags
 
 def send_photo_with_caption(photo_bytes, caption):
     if not BOT_TOKEN:
         raise RuntimeError("Нет BOT_TOKEN (добавь секреты в Settings → Secrets → Actions)")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
     files = {"photo": ("cover.png", photo_bytes, "image/png")}
-    data = {"chat_id": CHANNEL_ID, "caption": caption, "parse_mode": "Markdown"}
+    data = {"chat_id": CHANNEL_ID, "caption": caption, "parse_mode": "MarkdownV2"}
     r = requests.post(url, files=files, data=data, timeout=30)
     print("Telegram sendPhoto:", r.status_code, r.text[:200])
     r.raise_for_status()
     return r.json()
 
-# ====== Сбор фидов ======
+# ========= Сбор фидов =========
 def collect_entries():
     items=[]
     for feed_url in RSS_FEEDS:
@@ -456,24 +475,22 @@ def collect_entries():
                           "summary":summary,"ts":ts,"dt":dt,"uid":uid})
     return items
 
-# ====== Фильтр «пустых» новостей ======
+# ========= Фильтр "пустых" новостей =========
 def is_low_quality(title_ru, p1, p2, p3, min_total=280):
     text = (p1 + " " + p2 + " " + p3).strip()
     if len(text) < min_total:
         return True
-    # если абзацы повторяют заголовок почти дословно — тоже отбрасываем
     core = re.sub(r"[«»\"'”“]", "", title_ru).lower()
     dup_score = sum(1 for x in [p1,p2,p3] if core[:40] in x.lower())
     return dup_score >= 2
 
-# ====== Процесс одной новости (одно сообщение) ======
+# ========= Процесс одной новости =========
 def process_item(item, now_utc):
     link, title, feed_summary, event_dt = item["link"], item["title"], item["summary"], item["dt"]
     title_ru = ensure_russian(title)
     article_text = fetch_article_text(link, max_chars=2600)
     p1, p2, p3 = build_three_paragraphs_scientific(title_ru, article_text, ensure_russian(feed_summary))
 
-    # фильтр пустых/слабых материалов
     if is_low_quality(title_ru, p1, p2, p3):
         print("Skip low-quality item:", clamp(title_ru, 80))
         return None
@@ -481,12 +498,10 @@ def process_item(item, now_utc):
     entities = extract_entities(title_ru, f"{p1} {p2} {p3}")
     hidden_tags = gen_hidden_tags(title_ru, f"{p1} {p2} {p3}", entities, min_tags=3, max_tags=5)
 
-    # карточка и единый caption
     card = draw_title_card(title_ru, domain(link or ""), TIMEZONE, event_dt, now_utc)
-    caption = build_full_caption(title_ru, p1, p2, p3, link or "", hidden_tags, event_dt, now_utc)
+    caption = build_full_caption(title_ru, p1, p2, p3, link or "", hidden_tags)
     resp = send_photo_with_caption(card, caption)
 
-    # история для дайджеста
     append_history({
         "uid": item["uid"], "title": title_ru, "link": link,
         "event_utc": event_dt.isoformat(), "posted_utc": now_utc.isoformat(),
@@ -495,7 +510,7 @@ def process_item(item, now_utc):
     print(f"Posted (single): {title_ru[:80]} | event={event_dt.isoformat()}")
     return resp
 
-# ====== MAIN ======
+# ========= MAIN =========
 def trim_posted(posted_set, keep_last=1500):
     if len(posted_set)<=keep_last: return posted_set
     return set(list(posted_set)[-keep_last:])
@@ -515,7 +530,6 @@ def main():
 
     to_post = fresh[:MAX_POSTS_PER_RUN]
 
-    # фолбэк: самое новое за N минут
     if not to_post and FALLBACK_ON_NO_FRESH:
         fallback_cutoff = now_utc - timedelta(minutes=FALLBACK_WINDOW_MIN)
         candidates = [it for it in items if it["uid"] not in posted and it["dt"] >= fallback_cutoff]
@@ -524,7 +538,6 @@ def main():
         if to_post:
             print(f"Fallback used: took newest item(s) within {FALLBACK_WINDOW_MIN} min.")
 
-    # режим «всегда постить»
     if not to_post and ALWAYS_POST:
         anyc = [it for it in items if it["uid"] not in posted]
         anyc.sort(key=lambda x: x["dt"], reverse=True)
