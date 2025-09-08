@@ -21,7 +21,7 @@ LOOKBACK_MINUTES   = int(os.environ.get("LOOKBACK_MINUTES", "30"))
 FRESH_WINDOW_MIN   = int(os.environ.get("FRESH_WINDOW_MIN", "25"))
 MIN_EVENT_YEAR     = int(os.environ.get("MIN_EVENT_YEAR", "2023"))
 
-# фолбэк и режим «всегда постить»
+# фолбэк и «всегда постить»
 FALLBACK_ON_NO_FRESH = os.environ.get("FALLBACK_ON_NO_FRESH", "1") == "1"
 FALLBACK_WINDOW_MIN  = int(os.environ.get("FALLBACK_WINDOW_MIN", "360"))  # 6 часов
 ALWAYS_POST          = os.environ.get("ALWAYS_POST", "1") == "1"
@@ -60,7 +60,7 @@ RSS_FEEDS_RU = [
     "https://www.mskagency.ru/rss/all",
     "https://www.ng.ru/rss/",
     "https://www.mk.ru/rss/finance/index.xml",
-    "https://www.kommersant.ru/RSS/regions.xml",
+    "https://www.комmersant.ru/RSS/regions.xml".replace("ком","kom"),  # безопасно
     "https://www.kommersant.ru/RSS/tech.xml",
     "https://www.fontanka.ru/fontanka.rss",
     "https://minfin.gov.ru/ru/press-center/?rss=Y",
@@ -88,7 +88,7 @@ try:
 except Exception:
     MORPH = None
 
-# ====== Служебные ======
+# ====== Утилиты ======
 def load_state():
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -147,7 +147,7 @@ LOCAL_EN_RU = {
     "dollar":"доллар","us dollar":"доллар США","reserve":"резерв","reserves":"резервы","safe haven":"тихая гавань",
     "gold":"золото","gold futures":"фьючерсы на золото","comex":"Comex","ounce":"унция","billion":"млрд",
     "percent":"%","percentage":"%","share":"доля","holdings":"запасы","treasuries":"казначейские облигации",
-    "alternative":"альтернатива","geopолитический":"геополитический","risk":"риск","risks":"риски",
+    "alternative":"альтернатива","geopolitical":"геополитический","risk":"риск","risks":"риски",
     "inflation":"инфляция","stability":"стабильность","assets":"активы","backed":"обеспеченный",
     "increase":"рост","rose":"вырос","rise":"рост","jump":"скачок","month":"месяц","monthly":"ежемесячный",
 }
@@ -223,7 +223,7 @@ def extract_candidate_nouns(text, entities, limit=12):
     out=[x for x in out if x and x.lower() not in RU_STOP]
     return out[:limit]
 def gen_hidden_tags(title, body, entities, min_tags=3, max_tags=5):
-    text_l=(title+" "+body).lower()
+    text_l = (title + " " + body).lower()
     thematic=[]
     def tadd(x):
         if x not in thematic: thematic.append(x)
@@ -250,7 +250,7 @@ def gen_hidden_tags(title, body, entities, min_tags=3, max_tags=5):
             if len(tags)>=min_tags: break
     return "||"+" ".join(tags[:max_tags])+"||"
 
-# ====== Градиент фона ======
+# ====== Градиент (ярче на ~30%) ======
 PALETTES = [((32,44,80),(12,16,28)),((16,64,88),(8,20,36)),((82,30,64),(14,12,24)),
             ((20,88,72),(8,24,22)),((90,60,22),(20,16,12)),((44,22,90),(16,12,32)),((24,26,32),(12,14,18))]
 def _boost(c, factor=1.3): return tuple(max(0, min(255, int(v*factor))) for v in c)
@@ -376,7 +376,7 @@ def draw_title_card(title_text, src_domain, tzname, event_dt_utc, post_dt_utc):
     d.text((48,26),CHANNEL_NAME,fill=(255,255,255),font=f_brand)
     try: tz=ZoneInfo(tzname)
     except Exception: tz=ZoneInfo("UTC")
-    ev=event_dt_utc.astimezone(tz).strftime("%d.%m %H:%М")
+    ev=event_dt_utc.astimezone(tz).strftime("%d.%m %H:%M")
     po=post_dt_utc.astimezone(tz).strftime("%d.%m %H:%M")
     right=f"пост: {po}"
     d.text((W-48-d.textlength(right,font=f_time),28),right,fill=(255,255,255),font=f_time)
@@ -390,40 +390,46 @@ def draw_title_card(title_text, src_domain, tzname, event_dt_utc, post_dt_utc):
     d.text((72,H-64),f"source: {src_domain}  •  событие: {ev}",font=f_small,fill=(230,230,230))
     bio=io.BytesIO(); bg.save(bio,format="PNG",optimize=True); bio.seek(0); return bio
 
-# ====== Подписи/отправка ======
-def build_caption_short(title, event_dt_utc, post_dt_utc):
-    title = clamp(title, 160)
+# ====== Подпись к ОДНОМУ сообщению (без кликабельного URL) ======
+def build_full_caption(title, p1, p2, p3, link, hidden_tags, event_dt_utc, post_dt_utc):
+    title = clamp(title, 200)
     tz = ZoneInfo(TIMEZONE)
     ev = event_dt_utc.astimezone(tz).strftime("%d.%m %H:%M")
     po = post_dt_utc.astimezone(tz).strftime("%d.%m %H:%M")
-    return f"{title}\nсобытие: {ev}  •  пост: {po}"
+    dom = root_domain(link) if link else "источник"
 
-def build_body_text(title, p1, p2, p3, link, hidden_tags):
-    dom = root_domain(link) if link else None
-    parts = [f"*{clamp(title, 200)}*", "", f"{p1}\n\n{p2}\n\n{p3}"]
-    if dom: parts += ["", f"Источник: [{dom}]({link})"]
-    parts += ["", f"🪙 [{CHANNEL_NAME}]({CHANNEL_LINK})"]
-    if hidden_tags: parts += ["", hidden_tags]
+    # ВНИМАНИЕ: ставим домен БЕЗ URL, чтобы Telegram не делал web-preview
+    parts = [
+        f"*{title}*",
+        "",
+        f"{p1}\n\n{p2}\n\n{p3}",
+        "",
+        f"Время события: {ev}  •  Время поста: {po}",
+        "",
+        f"Источник: {dom}",
+        "",
+        f"🪙 [{CHANNEL_NAME}]({CHANNEL_LINK})",
+    ]
+    if hidden_tags:
+        parts += ["", hidden_tags]  # останутся «как есть» (не спойлер), по твоему текущему формату
     text = "\n".join(parts)
-    if len(text) > 4000: text = text[:3996] + "…"
+    if len(text) > 1024:
+        over = len(text) - 1024 + 3
+        p3 = clamp(p3[:-min(over, len(p3))], 300)
+        parts[2] = f"{p1}\n\n{p2}\n\n{p3}"
+        text = "\n".join(parts)
     return text
 
-def send_photo(photo_bytes, caption):
+def send_photo_with_caption(photo_bytes, caption):
     if not BOT_TOKEN:
-        raise RuntimeError("Нет BOT_TOKEN")
-    url=f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
-    files={"photo":("cover.png",photo_bytes,"image/png")}
-    data={"chat_id":CHANNEL_ID,"caption":caption,"parse_mode":"Markdown"}
-    r=requests.post(url,files=files,data=data,timeout=30); print("Telegram photo:", r.status_code, r.text[:200])
-    r.raise_for_status(); return r.json()
-
-def send_text(text):
-    if not BOT_TOKEN:
-        raise RuntimeError("Нет BOT_TOKEN")
-    url=f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data={"chat_id":CHANNEL_ID,"text":text,"parse_mode":"Markdown","disable_web_page_preview":True}
-    r=requests.post(url,data=data,timeout=30); print("Telegram text:", r.status_code, r.text[:200])
-    r.raise_for_status(); return r.json()
+        raise RuntimeError("Нет BOT_TOKEN (добавь секреты в Settings → Secrets → Actions)")
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
+    files = {"photo": ("cover.png", photo_bytes, "image/png")}
+    data = {"chat_id": CHANNEL_ID, "caption": caption, "parse_mode": "Markdown"}
+    r = requests.post(url, files=files, data=data, timeout=30)
+    print("Telegram sendPhoto:", r.status_code, r.text[:200])
+    r.raise_for_status()
+    return r.json()
 
 # ====== Сбор фидов ======
 def collect_entries():
@@ -450,29 +456,44 @@ def collect_entries():
                           "summary":summary,"ts":ts,"dt":dt,"uid":uid})
     return items
 
-# ====== Процесс одной новости ======
+# ====== Фильтр «пустых» новостей ======
+def is_low_quality(title_ru, p1, p2, p3, min_total=280):
+    text = (p1 + " " + p2 + " " + p3).strip()
+    if len(text) < min_total:
+        return True
+    # если абзацы повторяют заголовок почти дословно — тоже отбрасываем
+    core = re.sub(r"[«»\"'”“]", "", title_ru).lower()
+    dup_score = sum(1 for x in [p1,p2,p3] if core[:40] in x.lower())
+    return dup_score >= 2
+
+# ====== Процесс одной новости (одно сообщение) ======
 def process_item(item, now_utc):
     link, title, feed_summary, event_dt = item["link"], item["title"], item["summary"], item["dt"]
-    title_ru=ensure_russian(title)
-    article_text=fetch_article_text(link, max_chars=2600)
-    p1,p2,p3=build_three_paragraphs_scientific(title_ru, article_text, ensure_russian(feed_summary))
-    entities=extract_entities(title_ru, f"{p1} {p2} {p3}")
-    hidden_tags=gen_hidden_tags(title_ru, f"{p1} {p2} {p3}", entities, min_tags=3, max_tags=5)
+    title_ru = ensure_russian(title)
+    article_text = fetch_article_text(link, max_chars=2600)
+    p1, p2, p3 = build_three_paragraphs_scientific(title_ru, article_text, ensure_russian(feed_summary))
 
-    card=draw_title_card(title_ru, domain(link or ""), TIMEZONE, event_dt, now_utc)
-    caption_short=build_caption_short(title_ru, event_dt, now_utc)
-    resp_photo=send_photo(card, caption_short)
+    # фильтр пустых/слабых материалов
+    if is_low_quality(title_ru, p1, p2, p3):
+        print("Skip low-quality item:", clamp(title_ru, 80))
+        return None
 
-    body=build_body_text(title_ru, p1, p2, p3, link or "", hidden_tags)
-    resp_text=send_text(body)
+    entities = extract_entities(title_ru, f"{p1} {p2} {p3}")
+    hidden_tags = gen_hidden_tags(title_ru, f"{p1} {p2} {p3}", entities, min_tags=3, max_tags=5)
 
+    # карточка и единый caption
+    card = draw_title_card(title_ru, domain(link or ""), TIMEZONE, event_dt, now_utc)
+    caption = build_full_caption(title_ru, p1, p2, p3, link or "", hidden_tags, event_dt, now_utc)
+    resp = send_photo_with_caption(card, caption)
+
+    # история для дайджеста
     append_history({
         "uid": item["uid"], "title": title_ru, "link": link,
         "event_utc": event_dt.isoformat(), "posted_utc": now_utc.isoformat(),
         "tags": hidden_tags
     })
-    print(f"Posted: {title_ru[:80]} | event={event_dt.isoformat()}")
-    return {"photo": resp_photo, "text": resp_text}
+    print(f"Posted (single): {title_ru[:80]} | event={event_dt.isoformat()}")
+    return resp
 
 # ====== MAIN ======
 def trim_posted(posted_set, keep_last=1500):
@@ -514,16 +535,20 @@ def main():
     if not to_post:
         print("Nothing to post (fresh window + fallback disabled/empty)."); return
 
+    posted_any = False
     for it in to_post:
         try:
-            process_item(it, now_utc)
-            posted.add(it["uid"])
+            resp = process_item(it, now_utc)
+            if resp:
+                posted.add(it["uid"])
+                posted_any = True
             time.sleep(1.0)
         except Exception as e:
             print("Error sending:", e)
 
-    state["posted_uids"]=list(trim_posted(posted))
-    save_state(state)
+    if posted_any:
+        state["posted_uids"]=list(trim_posted(posted))
+        save_state(state)
 
 if __name__=="__main__":
     main()
