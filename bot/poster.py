@@ -3,7 +3,7 @@ from datetime import datetime, timezone, timedelta
 from dateutil import parser as dtparse
 import feedparser, requests
 from bs4 import BeautifulSoup
-from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 from zoneinfo import ZoneInfo
 
 # ========= БАЗОВЫЕ НАСТРОЙКИ =========
@@ -18,24 +18,22 @@ CHANNEL_LINK   = os.environ.get("CHANNEL_LINK", f"https://t.me/{CHANNEL_HANDLE.l
 MAX_POSTS_PER_RUN = int(os.environ.get("MAX_POSTS_PER_RUN", "5"))
 LOOKBACK_MINUTES  = int(os.environ.get("LOOKBACK_MINUTES", "90"))
 
-# ========= КОРОТКИЙ СПИСОК ИСТОЧНИКОВ (видно, что постим «из нескольких») =========
-# RU (без РИА)
+# ========= ИСТОЧНИКИ (короткий белый список; БЕЗ РИА) =========
 RSS_FEEDS_RU = [
-    "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",           # РБК (общая)
-    "https://www.kommersant.ru/RSS/news.xml",                      # Коммерсантъ (новости)
-    "https://lenta.ru/rss/news",                                   # Lenta.ru (новости)
-    "https://tass.ru/rss/v2.xml",                                  # ТАСС
-    "https://www.vedomosti.ru/rss/news",                           # Ведомости
-    "https://www.interfax.ru/rss.asp",                             # Интерфакс
+    "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",   # РБК
+    "https://www.kommersant.ru/RSS/news.xml",              # Коммерсантъ
+    "https://lenta.ru/rss/news",                           # Lenta.ru
+    "https://tass.ru/rss/v2.xml",                          # ТАСС
+    "https://www.vedomosti.ru/rss/news",                   # Ведомости
+    "https://www.interfax.ru/rss.asp",                     # Интерфакс
 ]
-# WORLD / MARKETS / CRYPTO (короткий список)
 RSS_FEEDS_WORLD = [
-    "https://feeds.reuters.com/reuters/marketsNews",               # Reuters Markets
-    "https://feeds.reuters.com/Reuters/worldNews",                 # Reuters World
-    "https://www.ft.com/?format=rss",                              # Financial Times
-    "http://feeds.bbci.co.uk/news/business/rss.xml",               # BBC Business
-    "https://www.marketwatch.com/rss/topstories",                  # MarketWatch
-    "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml", # CoinDesk
+    "https://feeds.reuters.com/reuters/marketsNews",       # Reuters Markets
+    "https://feeds.reuters.com/Reuters/worldNews",         # Reuters World
+    "https://www.ft.com/?format=rss",                      # Financial Times
+    "http://feeds.bbci.co.uk/news/business/rss.xml",       # BBC Business
+    "https://www.marketwatch.com/rss/topstories",          # MarketWatch
+    "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml",  # CoinDesk
 ]
 RSS_FEEDS = RSS_FEEDS_RU + RSS_FEEDS_WORLD
 
@@ -44,14 +42,14 @@ STATE_FILE = DATA_DIR / "state.json"
 
 UA  = {"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
 
-# ========= PYMORPHY2 (для тегов) =========
+# ========= PYMORPHY2 (лемматизация для тегов) =========
 try:
     import pymorphy2
     MORPH = pymorphy2.MorphAnalyzer()
 except Exception:
     MORPH = None  # мягкий фолбэк
 
-# ========= УТИЛИТЫ =========
+# ========= ВСПОМОГАТЕЛЬНЫЕ =========
 def load_state():
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -81,7 +79,7 @@ def clamp(s, n):
     s = (s or "").strip()
     return s if len(s) <= n else s[:n-1] + "…"
 
-# ========= ЯЗЫК / ПЕРЕВОД (усиленный) =========
+# ========= ПЕРЕВОД EN→RU (жёсткий) =========
 def detect_lang(text: str) -> str:
     if re.search(r"[А-Яа-яЁё]", text): return "ru"
     en_hits = len(re.findall(r"\b(the|and|of|to|in|for|on|with|from|by|as|at|is|are|this|that|it|was|be)\b", text.lower()))
@@ -92,24 +90,18 @@ LT_ENDPOINTS = [
     "https://libretranslate.de/translate",
     "https://translate.argosopentech.com/translate",
 ]
-
-# «Толстый» локальный словарь на случай, если онлайн-перевод недоступен.
 LOCAL_EN_RU = {
     "china":"Китай","beijing":"Пекин","central bank":"центральный банк","central banks":"центральные банки",
     "dollar":"доллар","us dollar":"доллар США","reserve":"резерв","reserves":"резервы","safe haven":"тихая гавань",
     "gold":"золото","gold futures":"фьючерсы на золото","comex":"Comex","ounce":"унция","billion":"млрд",
-    "percent":"%", "percentage":"%", "share":"доля","holdings":"запасы","treasuries":"казначейские облигации",
+    "percent":"%","percentage":"%","share":"доля","holdings":"запасы","treasuries":"казначейские облигации",
     "alternative":"альтернатива","geopolitical":"геополитический","risk":"риск","risks":"риски",
     "inflation":"инфляция","stability":"стабильность","assets":"активы","backed":"обеспеченный",
     "increase":"рост","rose":"вырос","rise":"рост","jump":"скачок","month":"месяц","monthly":"ежемесячный",
 }
-
 def translate_hard_ru(text: str, timeout=14) -> str:
-    """Сначала LibreTranslate (несколько узлов), если не удалось — локальный фолбэк.
-       Возвращаем гарантированно русский текст (насколько возможно)."""
     text = (text or "").strip()
     if not text: return text
-    # 1) онлайн
     for ep in LT_ENDPOINTS:
         try:
             r = requests.post(ep, data={"q": text, "source":"en", "target":"ru", "format":"text"},
@@ -119,15 +111,9 @@ def translate_hard_ru(text: str, timeout=14) -> str:
                 if out and detect_lang(out) == "ru": return out.strip()
         except Exception:
             continue
-    # 2) локальный фолбэк: простая подмена частых слов + сохранение структуры
     s = text
-    # сначала длинные фразы
     for k in sorted(LOCAL_EN_RU.keys(), key=lambda x: -len(x)):
         s = re.sub(rf"\b{re.escape(k)}\b", LOCAL_EN_RU[k], s, flags=re.IGNORECASE)
-    # базовые замены единиц/чисел
-    s = re.sub(r"\bUS\$","$", s)
-    s = re.sub(r"\bper cent\b","%", s, flags=re.IGNORECASE)
-    # Пометим латиницу как «(англ.)», чтобы не выглядело как пропуск
     if detect_lang(s) == "en":
         s = "Перевод (упрощённый): " + s
     return s
@@ -135,13 +121,12 @@ def translate_hard_ru(text: str, timeout=14) -> str:
 def ensure_russian(text: str) -> str:
     return translate_hard_ru(text) if detect_lang(text) == "en" else text
 
-# ========= ИЗВЛЕЧЕНИЕ СУЩНОСТЕЙ =========
+# ========= СУЩНОСТИ ДЛЯ ТЕГОВ/СМЫСЛА =========
 COMPANY_HINTS = [
     "Apple","Microsoft","Tesla","Meta","Google","Alphabet","Amazon","Nvidia","Samsung","Intel","Huawei",
     "Газпром","Сбербанк","Яндекс","Роснефть","Лукойл","Норникель","Татнефть","Новатэк","ВТБ","Сургутнефтегаз"
 ]
 TICKER_PAT = re.compile(r"\b[A-Z]{2,6}\b")
-
 def extract_entities(title, summary):
     text = f"{title} {summary}".strip()
     names = re.findall(r"(?:[A-ZА-ЯЁ][a-zа-яё]+(?:\s+[A-ZА-ЯЁ][a-zа-яё]+){0,2})", text)
@@ -157,25 +142,46 @@ def extract_entities(title, summary):
             seen.add(x); uniq.append(x)
     return uniq or ["рынки","экономика"]
 
-# ========= ФОН: ТОЛЬКО ГРАДИЕНТ =========
-def gradient_bg(w=1080, h=540, top=(26,28,32), bottom=(10,12,16)):
-    img=Image.new("RGB",(w,h))
-    d=ImageDraw.Draw(img)
-    for y in range(h):
-        a=y/(h-1)
-        r=int(top[0]*(1-a)+bottom[0]*a)
-        g=int(top[1]*(1-a)+bottom[1]*a)
-        b=int(top[2]*(1-a)+bottom[2]*a)
-        d.line([(0,y),(w,y)], fill=(r,g,b))
-    # лёгкая виньетка
-    vign=Image.new("L",(w,h),0)
-    vd=ImageDraw.Draw(vign)
-    vd.ellipse([-w*0.2,-h*0.5,w*1.2,h*1.5], fill=220)
-    vign=vign.filter(ImageFilter.GaussianBlur(radius=80))
-    img=Image.composite(img, Image.new("RGB",(w,h),(0,0,0)), vign)
+# ========= ГРАДИЕНТ (каждый пост — новый) =========
+PALETTES = [
+    ((32, 44, 80), (12, 16, 28)),
+    ((16, 64, 88), (8, 20, 36)),
+    ((82, 30, 64), (14, 12, 24)),
+    ((20, 88, 72), (8, 24, 22)),
+    ((90, 60, 22), (20, 16, 12)),
+    ((44, 22, 90), (16, 12, 32)),
+    ((24, 26, 32), (12, 14, 18)),
+]
+def random_gradient(w=1080, h=540):
+    top, bottom = random.choice(PALETTES)
+    angle = random.choice([0, 15, 30, 45, 60, 75, 90, 120, 135])
+    img = Image.new("RGB", (w, h))
+    d = ImageDraw.Draw(img)
+    # рисуем линейный градиент с поворотом
+    steps = max(w, h)
+    for i in range(steps):
+        t = i / (steps - 1)
+        r = int(top[0]*(1-t) + bottom[0]*t)
+        g = int(top[1]*(1-t) + bottom[1]*t)
+        b = int(top[2]*(1-t) + bottom[2]*t)
+        # линия под углом: вычислим позицию
+        if angle in (0, 180):
+            d.line([(0,i*h//steps),(w,i*h//steps)], fill=(r,g,b))
+        elif angle in (90, 270):
+            d.line([(i*w//steps,0),(i*w//steps,h)], fill=(r,g,b))
+        else:
+            # простая диагональ — заполняем вертикаль и повернём
+            d.line([(i*w//steps,0),(i*w//steps,h)], fill=(r,g,b))
+    if angle not in (90, 270):
+        img = img.rotate(angle, expand=False, resample=Image.BICUBIC)
+    # лёгкая виньетка для контраста
+    mask = Image.new("L",(w,h),0)
+    md = ImageDraw.Draw(mask)
+    md.ellipse([-w*0.2,-h*0.4,w*1.2,h*1.4], fill=210)
+    mask = mask.filter(ImageFilter.GaussianBlur(radius=80))
+    img = Image.composite(img, Image.new("RGB",(w,h),(0,0,0)), mask)
     return img
 
-# ========= РЕНДЕР КАРТОЧКИ (перенос заголовка) =========
 def wrap_text_by_width(draw, text, font, max_width, max_lines=5):
     words = (text or "").split()
     lines, current = [], ""
@@ -192,6 +198,7 @@ def wrap_text_by_width(draw, text, font, max_width, max_lines=5):
     return lines
 
 def fit_title_in_box(draw, text, font_path, box_w, box_h, start_size=66, min_size=28, line_gap=8, max_lines=5):
+    from PIL import ImageFont
     for size in range(start_size, min_size-1, -2):
         font = ImageFont.truetype(font_path, size)
         lines = wrap_text_by_width(draw, text, font, box_w, max_lines=max_lines)
@@ -204,7 +211,7 @@ def fit_title_in_box(draw, text, font_path, box_w, box_h, start_size=66, min_siz
 
 def draw_title_card(title_text, src_domain, tzname):
     W, H = 1080, 540
-    bg = gradient_bg(W,H)
+    bg = random_gradient(W,H)
     overlay = Image.new("RGBA", (W, H), (0,0,0,0))
     ImageDraw.Draw(overlay).rounded_rectangle([40, 110, W-40, H-90], radius=28, fill=(0,0,0,118))
     bg = Image.alpha_composite(bg.convert("RGBA"), overlay).convert("RGB")
@@ -212,6 +219,7 @@ def draw_title_card(title_text, src_domain, tzname):
 
     path_bold = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
     path_reg  = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    from PIL import ImageFont
     font_brand  = ImageFont.truetype(path_bold, 34)
     font_time   = ImageFont.truetype(path_reg, 26)
     font_small  = ImageFont.truetype(path_reg, 20)
@@ -236,7 +244,7 @@ def draw_title_card(title_text, src_domain, tzname):
     bio = io.BytesIO(); bg.save(bio, format="PNG", optimize=True); bio.seek(0)
     return bio
 
-# ========= СКАЧИВАНИЕ СТАТЬИ =========
+# ========= СТАТЬИ/РЕРАЙТ =========
 def fetch_article_text(url, max_chars=2600):
     try:
         r = requests.get(url, headers=UA, timeout=20)
@@ -254,7 +262,6 @@ def fetch_article_text(url, max_chars=2600):
     except Exception:
         return ""
 
-# ========= СТИЛЬ ТЕКСТА («научный») =========
 RU_TONE_REWRITE = [
     (r"\bсказал(а|и)?\b", "сообщил\\1"),
     (r"\bзаявил(а|и)?\b", "отметил\\1"),
@@ -293,7 +300,6 @@ def one_context_emoji(context):
     return "📰"
 
 def build_three_paragraphs_scientific(title, article_text, feed_summary):
-    # Переводим всё, что не RU, ещё ДО разбиения на предложения
     base_raw = (article_text or "").strip() or (feed_summary or "").strip()
     base_ru = ensure_russian(base_raw)
     sents = [s for s in split_sentences(base_ru) if s]
@@ -309,7 +315,7 @@ def build_three_paragraphs_scientific(title, article_text, feed_summary):
     emoji = one_context_emoji(f"{title} {base_ru}")
     return f"{emoji} {clamp(p1, 320)}", clamp(p2, 360), clamp(p3, 360)
 
-# ========= ТЕГИ: существительные, именительный падеж =========
+# ========= ТЕГИ (существительные И.п.; 3–5; скрытые) =========
 COUNTRY_PROPER = {
     "россия":"Россия","сша":"США","китай":"Китай","япония":"Япония","германия":"Германия","франция":"Франция",
     "великобритания":"Великобритания","индия":"Индия","европа":"Европа","украина":"Украина","турция":"Турция",
@@ -326,7 +332,7 @@ def lemma_noun(word):
             return nf
     return w
 
-def extract_candidate_nouns(text, entities, limit=10):
+def extract_candidate_nouns(text, entities, limit=12):
     words = re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", text)
     candidates = []
     for w in words:
@@ -354,12 +360,12 @@ def extract_candidate_nouns(text, entities, limit=10):
     out = [x for x in out if x and x.lower() not in RU_STOP]
     return out[:limit]
 
-def gen_tags_nominative(title, body, entities, max_tags=6):
+def gen_hidden_tags(title, body, entities, min_tags=3, max_tags=5):
     text_l = (title + " " + body).lower()
     thematic = []
-    def tadd(x):
+    def tadd(x): 
         if x not in thematic: thematic.append(x)
-
+    # Тематики как существительные
     if any(k in text_l for k in ["биткоин","bitcoin","btc","крипт","ethereum","eth","stablecoin"]): tadd("крипта")
     if any(k in text_l for k in ["доллар","usd","евро","eur","рубл","rub","юань","cny","курс","форекс"]): tadd("валюта")
     if any(k in text_l for k in ["акци","рынок","бирж","индекс","nasdaq","nyse","s&p","sp500","dow"]): tadd("рынки")
@@ -369,58 +375,66 @@ def gen_tags_nominative(title, body, entities, max_tags=6):
 
     nouns = extract_candidate_nouns(title + " " + body, entities, limit=12)
 
+    # Собираем; строго 3–5 тегов
     result = []
     def add(s):
-        if s and s not in result and len(result) < max_tags:
+        if s and s not in result:
             result.append(s)
+
     for t in thematic: add(t)
     for n in nouns: add(COUNTRY_PROPER.get(n.lower(), n))
 
+    # Конвертируем в хэштеги
     tags=[]
-    for t in result[:max_tags]:
+    for t in result:
         if re.fullmatch(r"[A-Z]{2,6}", t):
             tags.append("#"+t)
         else:
-            if t in COUNTRY_PROPER.values():
-                tags.append("#"+t)        # страны — с заглавной
-            else:
-                tags.append("#"+t.lower())  # общие — строчные
-    return " ".join(tags[:max_tags])
+            if t in COUNTRY_PROPER.values(): tags.append("#"+t)
+            else: tags.append("#"+t.lower())
+        if len(tags) >= max_tags: break
+    if len(tags) < min_tags:
+        # добьём общими, если мало
+        for extra in ["#рынки","#валюта","#крипта","#ставки","#энергетика","#геополитика"]:
+            if extra not in tags: tags.append(extra)
+            if len(tags) >= min_tags: break
+
+    # «Скрываем» в спойлер (видно только по нажатию)
+    return "||" + " ".join(tags[:max_tags]) + "||"
 
 # ========= КАПШЕН =========
-def build_caption(title, para1, para2, para3, link, tags_str):
+def build_caption(title, para1, para2, para3, link, hidden_tags):
     title = clamp(title, 200)
     dom = root_domain(link) if link else None
     body = f"{para1}\n\n{para2}\n\n{para3}"
 
     parts = [title, "", body]
-    if dom: parts += ["", f"Источник: [{dom}]({link})"]
-    else:   parts += ["", "Источник: неизвестно"]
-    parts += ["", f"[{CHANNEL_NAME}]({CHANNEL_LINK})"]
-    if tags_str: parts += ["", tags_str]
+    parts += ["", f"Источник: [{dom}]({link})" if dom else "Источник: неизвестно"]
+    parts += ["", f"🪙 [{CHANNEL_NAME}]({CHANNEL_LINK})"]  # эмодзи перед ссылкой на канал
+    if hidden_tags: parts += ["", hidden_tags]
 
     cap = "\n".join(parts)
-    # Телеграм лимит ~1024 символа у caption — компактное сжатие по необходимости:
+    # Компактирование под лимит Telegram (~1024)
     if len(cap) > 1024:
         over = len(cap) - 1024 + 3
         p3 = clamp(para3[:-min(over, len(para3))], 300)
-        parts = [title, "", f"{para1}\n\n{para2}\n\n{p3}"]
-        parts += ["", f"Источник: [{dom}]({link})" if dom else "Источник: неизвестно",
-                  "", f"[{CHANNEL_NAME}]({CHANNEL_LINK})", "", tags_str]
+        parts = [title, "", f"{para1}\n\n{para2}\n\n{p3}",
+                 "", f"Источник: [{dom}]({link})" if dom else "Источник: неизвестно",
+                 "", f"🪙 [{CHANNEL_NAME}]({CHANNEL_LINK})", "", hidden_tags]
         cap = "\n".join(parts)
         if len(cap) > 1024:
             over = len(cap) - 1024 + 3
             p2 = clamp(para2[:-min(over, len(para2))], 300)
-            parts = [title, "", f"{para1}\n\n{p2}\n\n{p3}"]
-            parts += ["", f"Источник: [{dom}]({link})" if dom else "Источник: неизвестно",
-                      "", f"[{CHANNEL_NAME}]({CHANNEL_LINK})", "", tags_str]
+            parts = [title, "", f"{para1}\n\n{p2}\n\n{p3}",
+                     "", f"Источник: [{dom}]({link})" if dom else "Источник: неизвестно",
+                     "", f"🪙 [{CHANNEL_NAME}]({CHANNEL_LINK})", "", hidden_tags]
             cap = "\n".join(parts)
             if len(cap) > 1024:
                 over = len(cap) - 1024 + 3
                 p1 = clamp(para1[:-min(over, len(para1))], 280)
-                parts = [title, "", f"{p1}\n\n{p2}\n\n{p3}"]
-                parts += ["", f"Источник: [{dom}]({link})" if dom else "Источник: неизвестно",
-                          "", f"[{CHANNEL_NAME}]({CHANNEL_LINK})", "", tags_str]
+                parts = [title, "", f"{p1}\n\n{p2}\n\n{p3}",
+                         "", f"Источник: [{dom}]({link})" if dom else "Источник: неизвестно",
+                         "", f"🪙 [{CHANNEL_NAME}]({CHANNEL_LINK})", "", hidden_tags]
                 cap = "\n".join(parts)
     return cap
 
@@ -451,8 +465,7 @@ def collect_entries():
             ts = getattr(e, "published", getattr(e, "updated", "")) or ""
             try:
                 dt = dtparse.parse(ts)
-                if not dt.tzinfo:
-                    dt = dt.replace(tzinfo=timezone.utc)
+                if not dt.tzinfo: dt = dt.replace(tzinfo=timezone.utc)
             except Exception:
                 dt = datetime(1970,1,1, tzinfo=timezone.utc)
             uid = hashlib.sha256((link + "|" + title + "|" + ts).encode("utf-8")).hexdigest()
@@ -462,23 +475,17 @@ def collect_entries():
 
 # ========= ОБРАБОТКА ОДНОЙ НОВОСТИ =========
 def process_item(link, title, feed_summary):
-    # Перевод заголовка на русский — гарантированно
     title_ru = ensure_russian(title)
-    # Текст статьи
     article_text = fetch_article_text(link, max_chars=2600)
-    # Абзацы (факт → детали → последствия), с гарантированным переводом
     p1, p2, p3 = build_three_paragraphs_scientific(title_ru, article_text, ensure_russian(feed_summary))
 
-    # Теги (существительные, И.п.)
     entities_for_tags = extract_entities(title_ru, f"{p1} {p2} {p3}")
-    tags_str = gen_tags_nominative(title_ru, f"{p1} {p2} {p3}", entities_for_tags, max_tags=6) or "#новости"
+    hidden_tags = gen_hidden_tags(title_ru, f"{p1} {p2} {p3}", entities_for_tags, min_tags=3, max_tags=5)
 
-    # Фон — только градиент
     card = draw_title_card(title_ru, domain(link or ""), TIMEZONE)
-
-    caption = build_caption(title_ru, p1, p2, p3, link or "", tags_str)
+    caption = build_caption(title_ru, p1, p2, p3, link or "", hidden_tags)
     resp = send_photo(card, caption)
-    print(f"Posted: {title_ru[:80]} | tags={tags_str}")
+    print(f"Posted: {title_ru[:80]} | tags={hidden_tags}")
 
 # ========= MAIN =========
 def trim_posted(posted_set, keep_last=600):
