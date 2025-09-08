@@ -1,16 +1,13 @@
 name: USDT=Dollar Auto Poster (every 5 min)
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
   schedule:
     - cron: "*/5 * * * *"   # каждые 5 минут (UTC)
 
 concurrency:
   group: autopost
-  cancel-in-progress: true  # не пускать два прогона одновременно
-
-permissions:
-  contents: read
+  cancel-in-progress: true
 
 jobs:
   run-bot:
@@ -44,10 +41,9 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
           TIMEZONE: Europe/Zurich
-          # Ниже можно тонко подстроить «свежесть» и частоту
-          MAX_POSTS_PER_RUN: "6"      # сколько новостей за один прогон
-          LOOKBACK_MINUTES: "30"      # доп. окно на случай лагов фидов
-          FRESH_WINDOW_MIN: "20"      # считаем «самыми свежими» (минут)
-          MIN_EVENT_YEAR: "2023"      # отсечь старые вечнозелёные
+          MAX_POSTS_PER_RUN: "6"
+          LOOKBACK_MINUTES: "30"
+          FRESH_WINDOW_MIN: "20"
+          MIN_EVENT_YEAR: "2023"
         run: |
           python bot/poster.py
