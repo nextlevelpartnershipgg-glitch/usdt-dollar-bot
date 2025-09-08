@@ -59,7 +59,7 @@ def main():
     items.sort(key=lambda x: x["posted_utc"], reverse=True)
 
     lines = ["*Дайджест за 8 часов*"]
-    for it in items[:18]:
+    for it in items[:18]:  # ограничим, чтобы не упереться в лимит
         ev = datetime.fromisoformat(it["event_utc"]).astimezone(tz).strftime("%d.%m %H:%M")
         title = it["title"]
         link = it["link"]
