@@ -1,9 +1,9 @@
-name: USDT=Dollar Auto Poster (every 5 min)
+name: Auto Poster (every 12 min)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"   # каждые 5 минут (UTC)
+    - cron: "*/12 * * * *"   # каждые 12 минут (UTC)
 
 concurrency:
   group: autopost
@@ -13,23 +13,14 @@ jobs:
   run-bot:
     runs-on: ubuntu-latest
     timeout-minutes: 8
-
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
 
       - name: Install deps
         run: |
@@ -40,10 +31,10 @@ jobs:
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
-          TIMEZONE: Europe/Zurich
-          MAX_POSTS_PER_RUN: "6"
+          TIMEZONE: Europe/Moscow
+          MAX_POSTS_PER_RUN: "1"       # 1 пост за прогон → ~5/час
           LOOKBACK_MINUTES: "30"
-          FRESH_WINDOW_MIN: "20"
+          FRESH_WINDOW_MIN: "25"
           MIN_EVENT_YEAR: "2023"
         run: |
           python bot/poster.py
