@@ -1,4 +1,4 @@
-import os, io, json, time, textwrap, pathlib, hashlib, urllib.parse, random, re
+import os, io, json, time, textwrap, pathlib, hashlib, urllib.parse, random, re, math
 from datetime import datetime, timezone, timedelta
 from dateutil import parser as dtparse
 import feedparser, requests
@@ -20,43 +20,34 @@ LOOKBACK_MINUTES  = int(os.environ.get("LOOKBACK_MINUTES", "90"))
 
 # ========= ИСТОЧНИКИ =========
 RSS_FEEDS_RU = [
-    # РБК
     "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
     "https://rssexport.rbc.ru/rbcnews/economics/30/full.rss",
     "https://rssexport.rbc.ru/rbcnews/finance/30/full.rss",
     "https://rssexport.rbc.ru/rbcnews/politics/30/full.rss",
-    # Lenta
     "https://lenta.ru/rss/news",
     "https://lenta.ru/rss/economics",
     "https://lenta.ru/rss/russia",
     "https://lenta.ru/rss/world",
-    # Коммерсантъ
     "https://www.kommersant.ru/RSS/news.xml",
     "https://www.kommersant.ru/RSS/economics.xml",
     "https://www.kommersant.ru/RSS/finance.xml",
-    # Газета.ru
     "https://www.gazeta.ru/export/rss/first.xml",
     "https://www.gazeta.ru/export/rss/business.xml",
     "https://www.gazeta.ru/export/rss/politics.xml",
-    # ТАСС / Ведомости / Интерфакс / РИА / Известия / Финмаркет
     "https://tass.ru/rss/v2.xml",
     "https://www.vedomosti.ru/rss/news",
     "https://www.interfax.ru/rss.asp",
     "https://ria.ru/export/rss2/archive/index.xml",
     "https://iz.ru/xml/rss/all.xml",
     "https://www.finmarket.ru/rss/news.asp",
-    # Профильные
     "https://banki.ru/xml/news.rss",
     "https://www.kommersant.ru/RSS/regions.xml",
     "https://www.kommersant.ru/RSS/tech.xml",
 ]
-
 RSS_FEEDS_WORLD = [
-    # Reuters
     "https://feeds.reuters.com/reuters/businessNews",
     "https://feeds.reuters.com/Reuters/worldNews",
     "https://feeds.reuters.com/reuters/marketsNews",
-    # Bloomberg / FT / WSJ / BBC / CNN / CNBC / Guardian / NYT / MW
     "https://feeds.bloomberg.com/politics/news.rss",
     "https://www.bloomberg.com/feeds/podcasts/etf_report.xml",
     "https://www.ft.com/?format=rss",
@@ -74,11 +65,9 @@ RSS_FEEDS_WORLD = [
     "https://www.aljazeera.com/xml/rss/all.xml",
     "https://asia.nikkei.com/rss",
     "https://www.scmp.com/rss/91/feed",
-    # Крипта (международные)
     "https://www.coindesk.com/arc/outboundfeeds/rss/?outputType=xml",
     "https://cointelegraph.com/rss",
 ]
-
 RSS_FEEDS = RSS_FEEDS_RU + RSS_FEEDS_WORLD
 
 DATA_DIR = pathlib.Path("data"); DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -87,12 +76,12 @@ STATE_FILE = DATA_DIR / "state.json"
 UA  = {"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
 UA_IMG = {"User-Agent":"Mozilla/5.0"}
 
-# ========= PYMORPHY2 (для лемматизации тегов) =========
+# ========= PYMORPHY2 =========
 try:
     import pymorphy2
     MORPH = pymorphy2.MorphAnalyzer()
 except Exception:
-    MORPH = None  # будет фолбэк
+    MORPH = None
 
 # ========= ВСПОМОГАТЕЛЬНЫЕ =========
 def load_state():
@@ -170,7 +159,7 @@ def translate_en_to_ru(text: str, timeout=12) -> str:
         s = re.sub(rf"\b{re.escape(k)}\b", LOCAL_EN_RU[k], s, flags=re.IGNORECASE)
     return s
 
-# ========= ФОН (персона/предмет) =========
+# ========= ИЗВЛЕЧЕНИЕ СУЩНОСТЕЙ И ТЕМ =========
 COMPANY_HINTS = [
     "Apple","Microsoft","Tesla","Meta","Google","Alphabet","Amazon","Nvidia","Samsung","Intel","Huawei",
     "Газпром","Сбербанк","Яндекс","Роснефть","Лукойл","Норникель","Татнефть","Новатэк","ВТБ","Сургутнефтегаз"
@@ -185,56 +174,215 @@ def extract_entities(title, summary):
     stop = {"The","This"}
     names = [x for x in names if x not in stop and len(x) > 2]
     out = []
-    out += names[:3]; out += companies[:3]; out += tickers[:3]
-    return out or ["finance","market"]
+    out += names[:5]; out += companies[:5]; out += tickers[:5]
+    # удалим дубликаты, сохраняя порядок
+    seen=set(); uniq=[]
+    for x in out:
+        if x not in seen:
+            seen.add(x); uniq.append(x)
+    return uniq or ["finance","market"]
 
-def build_photo_query(entities):
-    ent = entities[0] if entities else ""
-    if ent and len(ent.split()) >= 2 and all(w and w[0].isupper() for w in ent.split()):
-        return f"portrait,{ent}"
-    return ",".join(entities[:3])
+# ========= КОНТЕКСТНЫЕ КАНДИДАТЫ ДЛЯ ФОТО =========
+COUNTRY_PROPER = {
+    "россия":"Россия","сша":"США","китай":"Китай","япония":"Япония","германия":"Германия","франция":"Франция",
+    "великобритания":"Великобритания","индия":"Индия","европа":"Европа","украина":"Украина","турция":"Турция",
+}
 
-def fetch_unsplash_image(query, w=1080, h=540, retries=3):
+def topic_wiki_titles(text_lower):
+    t = text_lower
+    titles = []
+    def add(x):
+        if x not in titles: titles.append(x)
+    # Макро
+    if "инфляц" in t or "cpi" in t: add("Inflation"); add("Consumer price index")
+    if "ставк" in t or "фрс" in t or "federal reserve" in t: add("Federal Reserve")
+    if "ецб" in t or "european central bank" in t: add("European Central Bank")
+    if "банк япони" in t or "boj" in t: add("Bank of Japan")
+    if "банк англи" in t: add("Bank of England")
+    # Энергия/товары
+    if "нефть" in t or "brent" in t: add("Brent crude"); add("Petroleum")
+    if "wti" in t: add("West Texas Intermediate")
+    if "газ" in t: add("Natural gas")
+    if "золото" in t or "xau" in t: add("Gold")
+    # Крипта
+    if "биткоин" in t or "bitcoin" in t or "btc" in t: add("Bitcoin")
+    if "ethereum" in t or "эфириум" in t or "eth" in t: add("Ethereum")
+    if "stablecoin" in t or "usdt" in t: add("Tether (cryptocurrency)")
+    # Валюты
+    if "доллар" in t or "usd" in t: add("United States dollar")
+    if "евро" in t or "eur" in t: add("Euro")
+    if "рубл" in t or "rub" in t: add("Russian ruble")
+    if "юань" in t or "cny" in t: add("Renminbi")
+    # Геополитика
+    if "санкц" in t or "эмбарго" in t: add("Sanctions (international relations)")
+    return titles
+
+# ========= ВЫБОР ФОТО: Wikipedia → Unsplash → Picsum → Градиент =========
+def http_json(url, params=None, timeout=12):
+    r = requests.get(url, params=params, headers=UA, timeout=timeout)
+    if r.status_code != 200:
+        return None
+    return r.json()
+
+def wiki_summary_image(title, lang="ru"):
+    # REST summary: даёт originalimage/thumbnail
+    try:
+        api = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{urllib.parse.quote(title)}"
+        data = http_json(api, {})
+        if not data: return None
+        if "originalimage" in data and data["originalimage"].get("source"):
+            return data["originalimage"]["source"]
+        if "thumbnail" in data and data["thumbnail"].get("source"):
+            return data["thumbnail"]["source"]
+    except Exception:
+        pass
+    return None
+
+def wiki_search_image(query, lang="ru"):
+    # Сначала пробуем summary по прямому названию
+    url = wiki_summary_image(query, lang)
+    if url: return url
+    # Иначе — поиск title → id → summary
+    try:
+        res = http_json(f"https://{lang}.wikipedia.org/w/rest.php/v1/search/title",
+                        params={"q": query, "limit": 1})
+        if res and res.get("pages"):
+            key = res["pages"][0].get("key")
+            if key:
+                url = wiki_summary_image(key, lang)
+                if url: return url
+    except Exception:
+        pass
+    return None
+
+def download_image(url, timeout=20):
+    r = requests.get(url, headers=UA_IMG, timeout=timeout, allow_redirects=True)
+    if r.status_code != 200: return None
+    try:
+        return Image.open(io.BytesIO(r.content)).convert("RGB")
+    except Exception:
+        return None
+
+def resize_cover(img, W, H):
+    w, h = img.size
+    if w == 0 or h == 0:
+        return img.resize((W,H))
+    scale = max(W / w, H / h)
+    new_w, new_h = int(math.ceil(w*scale)), int(math.ceil(h*scale))
+    img = img.resize((new_w, new_h), Image.LANCZOS)
+    left = (new_w - W) // 2
+    top  = (new_h - H) // 2
+    return img.crop((left, top, left+W, top+H))
+
+def unsplash_by_context(keywords, w=1080, h=540, retries=3):
+    q = ",".join(keywords[:4]) if isinstance(keywords, list) else str(keywords)
     for i in range(retries):
         try:
             seed = random.randint(0, 10_000_000)
-            url = f"https://source.unsplash.com/{w}x{h}/?{urllib.parse.quote(query)}&sig={seed}"
+            url = f"https://source.unsplash.com/{w}x{h}/?{urllib.parse.quote(q)}&sig={seed}"
             r = requests.get(url, headers=UA_IMG, timeout=25, allow_redirects=True)
             if r.status_code == 200:
-                return Image.open(io.BytesIO(r.content)).convert("RGB")
-            time.sleep(0.8*(i+1))
+                return Image.open(io.BytesIO(r.content)).convert("RGB"), "source.unsplash.com"
+            time.sleep(0.6*(i+1))
         except Exception:
-            time.sleep(0.8*(i+1))
-    return None
+            time.sleep(0.6*(i+1))
+    return None, None
 
-def fetch_picsum_image(w=1080, h=540):
+def picsum_fallback(w=1080, h=540):
     try:
         seed = random.randint(1, 10_000_000)
         url = f"https://picsum.photos/{w}/{h}?random={seed}"
         r = requests.get(url, headers=UA_IMG, timeout=20, allow_redirects=True)
         if r.status_code == 200:
-            return Image.open(io.BytesIO(r.content)).convert("RGB")
+            return Image.open(io.BytesIO(r.content)).convert("RGB"), "picsum.photos"
     except Exception:
         pass
-    return None
+    return None, None
 
-def gradient_fallback(w=1080, h=540):
+def build_image_candidates(title, body, entities):
+    # Приоритет: персоны/компании/страны → тематические страницы → частотные существительные
+    text_l = f"{title} {body}".lower()
+    cands = []
+
+    # 1) Персоны/бренды/тикеры
+    for e in entities:
+        if re.fullmatch(r"[A-Z]{2,6}", e):
+            cands.append(e)
+        else:
+            cands.append(e)
+
+    # 2) Тематические вики-страницы
+    cands += topic_wiki_titles(text_l)
+
+    # 3) Страны (по словам)
+    for k,v in COUNTRY_PROPER.items():
+        if k in text_l:
+            cands.append(v)
+
+    # 4) Ключевые предметы/понятия (из текста)
+    extra = []
+    if "рынок" in text_l or "индекс" in text_l: extra += ["Stock market index","Stock exchange"]
+    if "облигац" in text_l or "доходност" in text_l: extra += ["Government bond","Bond (finance)","Yield (finance)"]
+    if "санкц" in text_l: extra += ["Sanctions (international relations)"]
+    if "банк" in text_l and "цент" in text_l: extra += ["Central bank"]
+    cands += extra
+
+    # удалим дубликаты, сохраняя порядок
+    seen=set(); uniq=[]
+    for x in cands:
+        if x and x not in seen:
+            seen.add(x); uniq.append(x)
+    return uniq[:12]  # ограничим верхушкой
+
+def select_context_image(title, article_text):
+    """
+    Пытаемся найти максимально релевантное фото:
+    1) Wikipedia/Commons (RU→EN)
+    2) Unsplash по контексту (ключевые слова из всей статьи)
+    3) Picsum
+    4) Градиент
+    """
+    entities = extract_entities(title, article_text)
+    candidates = build_image_candidates(title, article_text, entities)
+
+    # 1) Wikipedia/Commons
+    for cand in candidates:
+        for lang in ("ru", "en"):
+            url = wiki_search_image(cand, lang=lang)
+            if url:
+                img = download_image(url)
+                if img:
+                    return resize_cover(img, 1080, 540), "commons.wikimedia.org"
+
+    # 2) Unsplash: контекстная фраза
+    # Слепим ключевые слова: первые 3 сущности + тематические ключи
+    kw = []
+    for e in entities[:3]:
+        kw.append(e)
+    for t in topic_wiki_titles(f"{title} {article_text}".lower())[:3]:
+        kw.append(t)
+    img, src = unsplash_by_context(kw or ["finance","markets","economy"])
+    if img:
+        return img, src
+
+    # 3) Picsum
+    img, src = picsum_fallback()
+    if img:
+        return img, src
+
+    # 4) Градиент
+    img = Image.new("RGB",(1080,540))
+    d = ImageDraw.Draw(img)
     top=(24,26,28); bottom=(10,12,14)
-    img=Image.new("RGB",(w,h)); d=ImageDraw.Draw(img)
-    for y in range(h):
-        a=y/(h-1); r=int(top[0]*(1-a)+bottom[0]*a); g=int(top[1]*(1-a)+bottom[1]*a); b=int(top[2]*(1-a)+bottom[2]*a)
-        d.line([(0,y),(w,y)], fill=(r,g,b))
-    return img
+    for y in range(540):
+        a=y/539
+        r=int(top[0]*(1-a)+bottom[0]*a)
+        g=int(top[1]*(1-a)+bottom[1]*a)
+        b=int(top[2]*(1-a)+bottom[2]*a)
+        d.line([(0,y),(1080,y)], fill=(r,g,b))
+    return img, "gradient"
 
-def get_background(title, summary, w=1080, h=540):
-    entities = extract_entities(title, summary)
-    query = build_photo_query(entities)
-    img = fetch_unsplash_image(query, w, h) or fetch_picsum_image(w, h) or gradient_fallback(w, h)
-    img = img.filter(ImageFilter.GaussianBlur(radius=0.5))
-    img = ImageEnhance.Brightness(img).enhance(0.9)
-    return img
-
-# ========= КАРТОЧКА: перенос по словам =========
+# ========= КАРТОЧКА: перенос по словам + метка источника фото =========
 def wrap_text_by_width(draw, text, font, max_width, max_lines=5):
     words = text.split()
     lines, current = [], ""
@@ -264,12 +412,15 @@ def fit_title_in_box(draw, text, font_path, box_w, box_h, start_size=64, min_siz
     lines = wrap_text_by_width(draw, text, font, box_w, max_lines=max_lines)
     return font, lines
 
-def draw_title_card(title_text, src_domain, tzname):
+def draw_title_card(title_text, src_domain, tzname, img_source_label, base_img):
     W, H = 1080, 540
-    bg = get_background(title_text, "", W, H)
+    # уже готовый base_img (подобранный по контексту)
+    bg = base_img.copy()
+    bg = ImageEnhance.Brightness(bg).enhance(0.9).filter(ImageFilter.GaussianBlur(radius=0.4))
+
     overlay = Image.new("RGBA", (W, H), (0,0,0,0))
     od = ImageDraw.Draw(overlay)
-    od.rounded_rectangle([40, 110, W-40, H-90], radius=28, fill=(0,0,0,110))
+    od.rounded_rectangle([40, 110, W-40, H-90], radius=28, fill=(0,0,0,118))
     bg = Image.alpha_composite(bg.convert("RGBA"), overlay).convert("RGB")
     d = ImageDraw.Draw(bg)
 
@@ -277,7 +428,7 @@ def draw_title_card(title_text, src_domain, tzname):
     path_reg  = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     font_brand  = ImageFont.truetype(path_bold, 34)
     font_time   = ImageFont.truetype(path_reg, 26)
-    font_small  = ImageFont.truetype(path_reg, 22)
+    font_small  = ImageFont.truetype(path_reg, 20)
 
     d.text((48, 26), CHANNEL_NAME, fill=(255,255,255), font=font_brand)
     try: tz = ZoneInfo(tzname)
@@ -294,7 +445,11 @@ def draw_title_card(title_text, src_domain, tzname):
         d.text((box_x, y), ln, font=font_title, fill=(255,255,255))
         y += font_title.getbbox("Ag")[3] + 8
 
-    d.text((72, H - 58), f"source: {src_domain}", font=font_small, fill=(225,225,225))
+    # Левый низ — домен новости; правый низ — источник изображения
+    d.text((72, H - 58), f"source: {src_domain}", font=font_small, fill=(230,230,230))
+    img_label = f"img: {img_source_label}"
+    d.text((W - 72 - d.textlength(img_label, font=font_small), H - 58), img_label, font=font_small, fill=(230,230,230))
+
     bio = io.BytesIO(); bg.save(bio, format="PNG", optimize=True); bio.seek(0)
     return bio
 
@@ -384,14 +539,7 @@ def build_three_paragraphs_scientific(title, article_text, feed_summary):
     return p1, p2, p3
 
 # ========= ТЕГИ (существительные, И.п.) =========
-RU_STOP = set("""
-это тот эта которые который которой которых таком таком-то также поэтому таким чтобы при про для на из от по как уже еще или либо либо-же чем чем-то если когда где куда всего весь все вся того той его ее их наш ваш свой мой твой один две три четыре пять шесть семь восемь девять ноль
-""".split())
-
-COUNTRY_PROPER = {
-    "россия":"Россия","сша":"США","китай":"Китай","япония":"Япония","германия":"Германия","франция":"Франция",
-    "великобритания":"Великобритания","индия":"Индия","россий":"Россия","европа":"Европа"
-}
+RU_STOP = set("это тот эта которые который которой которых также поэтому чтобы при про для на из от по как уже еще или либо чем если когда где куда весь все вся его ее их наш ваш мой твой один одна одно".split())
 
 def lemma_noun(word):
     w = word.lower()
@@ -399,60 +547,45 @@ def lemma_noun(word):
         p = MORPH.parse(w)[0]
         if 'NOUN' in p.tag:
             nf = p.normal_form
-            # собственные имена/страны — с заглавной
             if nf in COUNTRY_PROPER:
                 return COUNTRY_PROPER[nf]
-            # иначе маленькими (в тегах принято)
             return nf
-    # фолбэк: вернем как есть
     return w
 
 def extract_candidate_nouns(text, entities, limit=10):
-    # базовый сбор: слова кириллицей/латиницей + сущности/тикеры
     words = re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", text)
     candidates = []
     for w in words:
         wl = w.lower()
         if wl in RU_STOP: 
             continue
-        # отфильтруем служебные
-        if re.fullmatch(r"[A-Za-z]{3,}", wl) and wl in {"the","and","for","with","from","that"}:
-            continue
         candidates.append(wl)
-
-    # плюс сущности
     for e in entities:
         if re.fullmatch(r"[A-Z]{2,6}", e):
-            candidates.append(e)  # тикер
+            candidates.append(e)
         else:
             candidates += e.split()
-
-    # к леммам
     lemmas = []
     for c in candidates:
         if re.fullmatch(r"[A-Z]{2,6}", c):
-            lemmas.append(c)  # тикер без изменений
+            lemmas.append(c)
         else:
             l = lemma_noun(c)
             if l and len(l) >= 3:
                 lemmas.append(l)
-    # частотная сортировка
     freq = {}
     for l in lemmas:
         freq[l] = freq.get(l, 0) + 1
     out = [k for k,_ in sorted(freq.items(), key=lambda x: -x[1])]
-    # финальный фильтр: только буквы/цифры
     out = [re.sub(r"[^A-Za-zА-Яа-яЁё0-9]", "", x) for x in out]
     out = [x for x in out if x and x.lower() not in RU_STOP]
     return out[:limit]
 
 def gen_tags_nominative(title, body, entities, max_tags=6):
-    # базовые тематики (в виде нормальной формы)
-    thematic = []
     text_l = (title + " " + body).lower()
+    thematic = []
     def tadd(x):
-        if x not in thematic:
-            thematic.append(x)
+        if x not in thematic: thematic.append(x)
 
     if any(k in text_l for k in ["биткоин","bitcoin","btc","крипт","ethereum","eth","stablecoin"]): tadd("крипта")
     if any(k in text_l for k in ["доллар","usd","евро","eur","рубл","rub","юань","cny","курс","форекс"]): tadd("валюта")
@@ -461,35 +594,24 @@ def gen_tags_nominative(title, body, entities, max_tags=6):
     if any(k in text_l for k in ["нефть","брент","wti","opec","газ","энерги","lng"]): tadd("энергетика")
     if any(k in text_l for k in ["санкц","эмбарго","пошлин","геополит","переговор","президент"]): tadd("геополитика")
 
-    # кандидаты-существительные
     nouns = extract_candidate_nouns(title + " " + body, entities, limit=12)
 
-    # собираем финальные (сначала тематические, потом частотные)
     result = []
-    def add_tag(s):
+    def add(s):
         if s and s not in result and len(result) < max_tags:
             result.append(s)
+    for t in thematic: add(t)
+    for n in nouns: add(COUNTRY_PROPER.get(n.lower(), n))
 
-    for t in thematic:
-        add_tag(t)
-
-    for n in nouns:
-        # нормализуем заглавные для стран
-        cap = COUNTRY_PROPER.get(n.lower(), n)
-        add_tag(cap)
-
-    # тикеры (#BTC) уже могут попасть как кандидаты — оставим их как есть
-    tags = []
+    tags=[]
     for t in result[:max_tags]:
         if re.fullmatch(r"[A-Z]{2,6}", t):
-            tags.append("#" + t)
+            tags.append("#"+t)
         else:
-            # делаем хэштег в именительном падеже
-            # страны и имена — с заглавной, прочие — строчные
             if t in COUNTRY_PROPER.values():
-                tags.append("#" + t)
+                tags.append("#"+t)
             else:
-                tags.append("#" + t.lower())
+                tags.append("#"+t.lower())
     return " ".join(tags[:max_tags])
 
 # ========= КАПШЕН =========
@@ -507,7 +629,6 @@ def build_caption(title, para1, para2, para3, link, tags_str):
 
     cap = "\n".join(parts)
 
-    # лимит подписи ~1024 → поочерёдно укорачиваем 3→2→1 абзац
     if len(cap) > 1024:
         over = len(cap) - 1024 + 3
         p3 = clamp(para3[:-min(over, len(para3))], 300)
@@ -567,7 +688,7 @@ def collect_entries():
                           "summary": summary, "ts": ts, "dt": dt, "uid": uid})
     return items
 
-# ========= ОБРАБОТКА ОДНОЙ НОВОСТИ =========
+# ========= ОБРАБОТКА =========
 def build_three_paragraphs_scientific(title, article_text, feed_summary):
     base = (article_text or "").strip() or (feed_summary or "").strip()
     if detect_lang(base) == "en":
@@ -592,11 +713,16 @@ def process_item(link, title, feed_summary):
     article_text = fetch_article_text(link, max_chars=2600)
     p1, p2, p3 = build_three_paragraphs_scientific(title, article_text, feed_summary)
 
-    entities = extract_entities(title, f"{p1} {p2} {p3}")
-    tags_str = gen_tags_nominative(title, f"{p1} {p2} {p3}", entities, max_tags=6) or "#новости"
+    # Теги
+    entities_for_tags = extract_entities(title, f"{p1} {p2} {p3}")
+    tags_str = gen_tags_nominative(title, f"{p1} {p2} {p3}", entities_for_tags, max_tags=6) or "#новости"
+
+    # Контекстное изображение
+    img_obj, img_src_label = select_context_image(title, article_text or feed_summary or "")
+    # Карточка
+    card = draw_title_card(title, domain(link or ""), TIMEZONE, img_src_label, img_obj)
 
     caption = build_caption(title, p1, p2, p3, link or "", tags_str)
-    card = draw_title_card(title, domain(link or ""), TIMEZONE)
     resp = send_photo(card, caption)
     print("Posted:", (title or "")[:80], "→", resp.get("ok", True))
 
