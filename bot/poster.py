@@ -1,22 +1,16 @@
 # bot/poster.py
-import os, io, re, random, time
-from datetime import datetime, timezone
+import os, io, re, random, time, json, hashlib, urllib.parse
+from datetime import datetime
 import requests, feedparser
 from PIL import Image, ImageDraw, ImageFont
 
-# =========================
-# Конфигурация из переменных среды (Secrets)
-# =========================
-BOT_TOKEN   = os.getenv("BOT_TOKEN", "").strip()
-CHANNEL_ID  = os.getenv("CHANNEL_ID", "@usdtdollarm").strip()  # ВАЖНО: @имя_канала
-TIMEZONE    = os.getenv("TIMEZONE", "Europe/Moscow")
+# ========= Конфиг из Secrets =========
+BOT_TOKEN   = os.getenv("BOT_TOKEN", "").strip()                 # токен из BotFather
+CHANNEL_ID  = os.getenv("CHANNEL_ID", "").strip()                # @имя_канала (НЕ id группы)
+MAX_POSTS_PER_RUN = int(os.getenv("MAX_POSTS_PER_RUN", "1"))     # сколько новостей постим за запуск
+HTTP_TIMEOUT = 12                                                # таймаут HTTP, сек
 
-MAX_POSTS_PER_RUN = int(os.getenv("MAX_POSTS_PER_RUN", "1"))   # сколько постим за один запуск
-HTTP_TIMEOUT      = 12                                         # сек, таймауты сетевых запросов
-
-# =========================
-# Русскоязычные RSS-источники (без РИА)
-# =========================
+# ========= Русские источники (без РИА) =========
 RSS_FEEDS = [
     "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
     "https://rssexport.rbc.ru/rbcnews/economics/30/full.rss",
@@ -54,16 +48,39 @@ RSS_FEEDS = [
 
 UA = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
 
-# =========================
-# Утилиты текста
-# =========================
+# ========= Состояние (анти-дубликаты) =========
+STATE_PATH = "data/state.json"
+
+def _norm_url(u: str) -> str:
+    if not u: return ""
+    p = urllib.parse.urlsplit(u)
+    q = urllib.parse.parse_qsl(p.query, keep_blank_values=True)
+    q = [(k, v) for (k, v) in q if not k.lower().startswith(("utm_", "yclid", "gclid", "fbclid"))]
+    return urllib.parse.urlunsplit((p.scheme, p.netloc.lower(), p.path, urllib.parse.urlencode(q), ""))
+
+def _uid_for(link: str, title: str) -> str:
+    key = _norm_url(link) or (title or "").strip().lower()
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+def _load_state():
+    try:
+        with open(STATE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"posted": []}
+
+def _save_state(state):
+    os.makedirs(os.path.dirname(STATE_PATH), exist_ok=True)
+    with open(STATE_PATH, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=2)
+
+# ========= Текстовые утилиты =========
 def detect_lang(text: str) -> str:
     return "ru" if re.search(r"[А-Яа-яЁё]", text or "") else "non-ru"
 
 def split_sentences(text: str):
     text = re.sub(r"\s+", " ", (text or "").strip())
-    if not text:
-        return []
+    if not text: return []
     return re.split(r"(?<=[.!?])\s+", text)
 
 def _smart_capitalize(s: str) -> str:
@@ -84,8 +101,7 @@ def _remove_unmatched(s: str, open_ch: str, close_ch: str) -> str:
             bal -= 1; out.append(ch)
         else:
             out.append(ch)
-    if bal > 0:
-        out.append(close_ch * bal)
+    if bal > 0: out.append(close_ch * bal)
     return "".join(out)
 
 def _balance_brackets_and_quotes(s: str) -> str:
@@ -111,36 +127,8 @@ def tidy_paragraph(p: str) -> str:
     p = _smart_capitalize(p)
     return p
 
-# =========================
-# Короткий аналитический вывод
-# =========================
-def _sentiment_hint(text: str) -> str:
-    t = (text or "").lower()
-    neg = any(k in t for k in ["паден", "снижен", "сокращ", "штраф", "санкц", "убыт", "дефиц", "отзыв", "кризис"])
-    pos = any(k in t for k in ["рост", "увелич", "расшир", "рекорд", "одобрен", "прибыл", "улучшен", "повышен"])
-    if pos and not neg: return "нейтрально-позитивная"
-    if neg and not pos: return "нейтрально-негативная"
-    return "нейтральная"
+RU_STOP = set("это этот эта эти такой такая такое такие как по при про для на из от или либо ещё уже если когда куда где чем что чтобы и в во а но же тот та то те к с о об".split())
 
-def generate_brief_analysis(title_ru: str, p1: str, p2: str, p3: str) -> str:
-    body = " ".join([p1 or "", p2 or "", p3 or ""])
-    mood = _sentiment_hint(body)
-    topic = "рынок"
-    tl = (title_ru + " " + body).lower()
-    if any(w in tl for w in ["ставк", "цб", "фрс", "инфляц"]): topic = "денежно-кредитная политика"
-    elif any(w in tl for w in ["нефть", "газ", "opec", "брент", "энерги", "lng"]): topic = "энергетика"
-    elif any(w in tl for w in ["акци", "бирж", "индекс", "nasdaq", "moex", "s&p", "облигац"]): topic = "финансовые рынки"
-    elif any(w in tl for w in ["крипт", "биткоин", "bitcoin", "eth", "стейбл"]): topic = "крипторынок"
-    elif any(w in tl for w in ["бюджет", "налог", "минфин"]): topic = "госфинансы"
-    elif any(w in tl for w in ["ввп", "безработ", "производств", "экспорт", "импорт"]): topic = "макроэкономика"
-    a1 = f"Итог ({topic}, {mood}): сообщение фиксирует факт и указывает на стадию процесса без смены ключевого тренда."
-    a2 = "Дальнейшие выводы зависят от последующих официальных данных и комментариев."
-    return a1 + " " + a2
-
-# =========================
-# Теги (3–5, существительные/ключевые слова)
-# =========================
-RU_STOP = set("это этот эта эти такой такой-то как по при про для на из от или либо ещё уже если когда куда где чем что чтобы и в во а но же же-то тот та то те к с о об".split())
 def extract_tags_source(text, min_tags=3, max_tags=5):
     words = re.findall(r"[A-Za-zА-Яа-яЁё]{3,}", (text or "").lower())
     words = [re.sub(r"[^a-zа-яё]", "", w) for w in words]
@@ -153,16 +141,14 @@ def extract_tags_source(text, min_tags=3, max_tags=5):
     for w in top:
         if len(tags) >= max_tags: break
         if w not in tags: tags.append(w)
-    while len(tags) < min_tags and "рынки" not in tags:
-        tags.append("рынки")
+    while len(tags) < min_tags and "рынки" not in tags: tags.append("рынки")
     return "||" + " ".join("#"+t for t in tags[:max_tags]) + "||"
 
-# =========================
-# Градиентная карточка с заголовком
-# =========================
+# ========= Карточка: случайный градиент + заголовок =========
 PALETTES = [((32,44,80),(12,16,28)), ((16,64,88),(8,20,36)), ((82,30,64),(14,12,24)),
             ((20,88,72),(8,24,22)), ((90,60,22),(20,16,12)), ((44,22,90),(16,12,32)),
             ((24,26,32),(12,14,18))]
+
 def _boost(c, k=1.3): return tuple(max(0, min(255, int(v*k))) for v in c)
 
 def generate_gradient(size=(1080, 540)):
@@ -170,65 +156,20 @@ def generate_gradient(size=(1080, 540)):
     top, bottom = random.choice(PALETTES)
     top, bottom = _boost(top,1.3), _boost(bottom,1.3)
     img = Image.new("RGB", (W,H))
-    dr = ImageDraw.Draw(img)
+    d = ImageDraw.Draw(img)
     for y in range(H):
         t = y/(H-1)
         r = int(top[0]*(1-t) + bottom[0]*t)
         g = int(top[1]*(1-t) + bottom[1]*t)
         b = int(top[2]*(1-t) + bottom[2]*t)
-        dr.line([(0,y),(W,y)], fill=(r,g,b))
+        d.line([(0,y),(W,y)], fill=(r,g,b))
     return img
 
 def _font(path: str, size: int):
     try:
         return ImageFont.truetype(path, size)
     except Exception:
-        # дефаултный шрифт без кириллицы худше, но не упадём
         return ImageFont.load_default()
-
-def draw_card(title: str, source_domain: str, post_stamp: str) -> io.BytesIO:
-    W,H = 1080, 540
-    img = generate_gradient((W,H)).convert("RGBA")
-    overlay = Image.new("RGBA",(W,H),(0,0,0,0))
-    ImageDraw.Draw(overlay).rounded_rectangle([40,110,W-40,H-90], radius=28, fill=(0,0,0,118))
-    img = Image.alpha_composite(img, overlay).convert("RGB")
-    d = ImageDraw.Draw(img)
-
-    font_bold = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 34)
-    font_reg  = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 22)
-
-    # Верх
-    d.text((48, 26), "USDT=Dollar", font=font_bold, fill=(255,255,255))
-    right = f"пост: {post_stamp}"
-    d.text((W-48-d.textlength(right,font=font_reg), 28), right, font=font_reg, fill=(255,255,255))
-
-    # Заголовок
-    title = (title or "").strip()
-    box_x, box_y = 72, 150
-    box_w, box_h = W-2*box_x, H-box_y-120
-    # подгон шрифта
-    size = 64
-    lines = []
-    while size >= 28:
-        f = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size)
-        lines = wrap_by_width(d, title, f, box_w, max_lines=5)
-        line_h = f.getbbox("Ag")[3]
-        total_h = len(lines)*line_h + (len(lines)-1)*8
-        if lines and total_h <= box_h: break
-        size -= 2
-    y = box_y
-    for ln in lines:
-        d.text((box_x, y), ln, font=f, fill=(255,255,255))
-        y += f.getbbox("Ag")[3] + 8
-
-    # Низ
-    small = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
-    d.text((72, H-64), f"source: {source_domain}", font=small, fill=(230,230,230))
-
-    bio = io.BytesIO()
-    img.save(bio, format="PNG", optimize=True)
-    bio.seek(0)
-    return bio
 
 def wrap_by_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_w: int, max_lines=5):
     words = (text or "").split()
@@ -245,9 +186,47 @@ def wrap_by_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeType
     if cur and len(lines) < max_lines: lines.append(cur)
     return lines
 
-# =========================
-# Сборка подписи к фото (HTML)
-# =========================
+def draw_card(title: str, source_domain: str, post_stamp: str) -> io.BytesIO:
+    W,H = 1080, 540
+    img = generate_gradient((W,H)).convert("RGBA")
+    overlay = Image.new("RGBA",(W,H),(0,0,0,0))
+    ImageDraw.Draw(overlay).rounded_rectangle([40,110,W-40,H-90], radius=28, fill=(0,0,0,118))
+    img = Image.alpha_composite(img, overlay).convert("RGB")
+    d = ImageDraw.Draw(img)
+
+    font_bold = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 34)
+    font_reg  = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+
+    d.text((48, 26), "USDT=Dollar", font=font_bold, fill=(255,255,255))
+    right = f"пост: {post_stamp}"
+    d.text((W-48-d.textlength(right,font=font_reg), 28), right, font=font_reg, fill=(255,255,255))
+
+    # заголовок
+    title = (title or "").strip()
+    box_x, box_y = 72, 150
+    box_w, box_h = W-2*box_x, H-box_y-120
+    size = 64; lines = []
+    while size >= 28:
+        f = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size)
+        lines = wrap_by_width(d, title, f, box_w, max_lines=5)
+        line_h = f.getbbox("Ag")[3]
+        total_h = len(lines)*line_h + (len(lines)-1)*8
+        if lines and total_h <= box_h: break
+        size -= 2
+    y = box_y
+    for ln in lines:
+        d.text((box_x, y), ln, font=f, fill=(255,255,255))
+        y += f.getbbox("Ag")[3] + 8
+
+    # низ
+    d.text((72, H-64), f"source: {source_domain}", font=font_reg, fill=(230,230,230))
+
+    bio = io.BytesIO()
+    img.save(bio, format="PNG", optimize=True)
+    bio.seek(0)
+    return bio
+
+# ========= Подпись к посту =========
 def html_escape(s: str) -> str:
     return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
@@ -263,78 +242,68 @@ def smart_join_and_trim(paragraphs, max_len=1024):
 def build_full_caption(title, p1, p2, p3, link, hidden_tags):
     dom = (re.sub(r"^www\.", "", (link or "").split("/")[2]) if link else "источник")
     title_html = f"<b>{html_escape(title)}</b>"
-
-    # формируем тело поста
-    body_plain = smart_join_and_trim([p1, p2, p3], max_len=1024-350)
+    body_plain = smart_join_and_trim([p1, p2, p3], max_len=1024-220)
     body_html  = html_escape(body_plain)
 
-    # футер (источник и канал)
     footer = [
         f'Источник: <a href="{html_escape(link)}">{html_escape(dom)}</a>',
         f'🪙 <a href="https://t.me/{CHANNEL_ID.lstrip("@")}">USDT=Dollar</a>'
     ]
     caption = f"{title_html}\n\n{body_html}\n\n" + "\n".join(footer)
 
-    # скрытые теги
     if hidden_tags:
         inner = hidden_tags.strip("|")
         spoiler = f'\n\n<span class="tg-spoiler">{html_escape(inner)}</span>'
         if len(caption + spoiler) <= 1024:
             return caption + spoiler
 
-    # если текст длинный — урезаем
     if len(caption) > 1024:
         main = smart_join_and_trim([body_plain], max_len=1024 - 100 - len("\n".join(footer)))
         caption = f"{title_html}\n\n{html_escape(main)}\n\n" + "\n".join(footer)
     return caption
 
-# =========================
-# Отправка фото (от имени канала)
-# =========================
+# ========= Отправка (как канал) =========
 def send_photo_with_caption(photo_bytes: io.BytesIO, caption: str):
     if not BOT_TOKEN: raise RuntimeError("BOT_TOKEN не задан")
-    if not CHANNEL_ID: raise RuntimeError("CHANNEL_ID не задан")
+    if not CHANNEL_ID or not CHANNEL_ID.startswith("@"):
+        raise RuntimeError("CHANNEL_ID должен быть в формате @имя_канала")
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
     files = {"photo": ("cover.png", photo_bytes, "image/png")}
     data  = {"chat_id": CHANNEL_ID, "caption": caption, "parse_mode": "HTML"}
     r = requests.post(url, files=files, data=data, timeout=HTTP_TIMEOUT)
     print("Telegram sendPhoto:", r.status_code, r.text[:180])
     r.raise_for_status()
-    return r.json()
 
-# =========================
-# Построение 3 абзацев из summary
-# =========================
+# ========= Формирование 3 абзацев без повторов =========
 def build_three_paragraphs_scientific(title, summary_text):
-    # summary уже русский, разобьём на предложения
-    sents = [s for s in split_sentences(summary_text) if s]
-    if not sents:
-        sents = [title]  # подстрахуемся
+    sents = [s.strip() for s in split_sentences(summary_text) if s.strip()]
+    uniq = []
+    for s in sents:
+        if not uniq or s.lower() != uniq[-1].lower():
+            uniq.append(s)
 
-    p1_src = sents[:2] or sents[:1]
-    p2_src = sents[2:5] or sents[:1]
-    p3_src = sents[5:8] or sents[1:3] or sents[:1]
+    p1 = " ".join(uniq[:2]) if uniq else title
+    p2 = " ".join(uniq[2:4]) if len(uniq) > 2 else ""
+    p3 = " ".join(uniq[4:6]) if len(uniq) > 4 else ""
 
-    p1 = " ".join(p1_src)
-    p2 = " ".join(p2_src)
-    p3 = " ".join(p3_src)
-
-    # Эмодзи по контексту первого абзаца
     emoji = "📰"
     t = (title + " " + summary_text).lower()
-    if any(k in t for k in ["акци", "индекс", "рынок", "бирж", "nasdaq", "moex", "s&p"]): emoji = "📈"
-    elif any(k in t for k in ["доллар", "рубл", "валют", "курс", "евро", "юань"]):        emoji = "💵"
-    elif any(k in t for k in ["нефть","газ","opec","брент","энерги","lng"]):               emoji = "🛢️"
-    elif any(k in t for k in ["крипт","биткоин","bitcoin","eth","стейбл"]):                emoji = "🪙"
-    elif any(k in t for k in ["ставк","цб","фрс","инфляц","cpi","ppi"]):                   emoji = "🏦"
+    if any(k in t for k in ["акци","индекс","рынок","бирж","nasdaq","moex","s&p"]): emoji = "📈"
+    elif any(k in t for k in ["доллар","рубл","валют","курс","евро","юань"]):      emoji = "💵"
+    elif any(k in t for k in ["нефть","газ","opec","брент","энерги","lng"]):       emoji = "🛢️"
+    elif any(k in t for k in ["крипт","биткоин","bitcoin","eth","стейбл"]):        emoji = "🪙"
+    elif any(k in t for k in ["ставк","цб","фрс","инфляц","cpi","ppi"]):           emoji = "🏦"
 
-    p1 = tidy_paragraph(f"{emoji} {p1}".strip()); p2 = tidy_paragraph(p2); p3 = tidy_paragraph(p3)
+    p1 = tidy_paragraph(f"{emoji} {p1}".strip())
+    p2 = tidy_paragraph(p2) if p2 else ""
+    p3 = tidy_paragraph(p3) if p3 else ""
     return p1, p2, p3
 
-# =========================
-# Основной цикл
-# =========================
+# ========= Главный цикл =========
 def main():
+    state = _load_state()
+    posted_uids = set(state.get("posted", []))
+    batch_seen  = set()
     posted = 0
     now = datetime.now().strftime("%d.%m %H:%M")
 
@@ -345,39 +314,41 @@ def main():
             print("Feed error:", feed_url, e); continue
 
         for e in fp.entries:
-            if posted >= MAX_POSTS_PER_RUN: break
+            if posted >= MAX_POSTS_PER_RUN:
+                break
 
-            title  = (getattr(e, "title", "") or "").strip()
+            title   = (getattr(e, "title", "") or "").strip()
             summary = (getattr(e, "summary", getattr(e, "description", "")) or "").strip()
-            link   = (getattr(e, "link", "") or "").strip()
+            link    = (getattr(e, "link", "") or "").strip()
 
-            # только русские элементы
+            # только русские записи
             if detect_lang(title + " " + summary) != "ru":
                 continue
 
-            # заголовок и текст
+            uid = _uid_for(link, title)
+            if uid in posted_uids or uid in batch_seen:
+                continue
+
             title_ru = tidy_paragraph(title)
             p1, p2, p3 = build_three_paragraphs_scientific(title_ru, summary)
 
-            # отфильтруем «пустые»
+            # выбросим слишком короткие тексты
             body_len = len((p1 + " " + p2 + " " + p3).strip())
-            if body_len < 250:
-                print("Skip low-quality item:", title_ru[:90])
-                continue
+            if body_len < 220:
+                print("Skip low-quality item:", title_ru[:90]); continue
 
-            # карточка
-            domain = (re.sub(r"^www\.", "", link.split("/")[2]) if link else "source")
-            card = draw_card(title_ru, domain, now)
-
-            # скрытые теги
+            domain = re.sub(r"^www\.", "", link.split("/")[2]) if link else "source"
+            card   = draw_card(title_ru, domain, now)
             hidden = extract_tags_source(title_ru + " " + summary, 3, 5)
-
-            # подпись
             caption = build_full_caption(title_ru, p1, p2, p3, link, hidden)
 
             try:
                 send_photo_with_caption(card, caption)
                 posted += 1
+                batch_seen.add(uid)
+                posted_uids.add(uid)
+                state["posted"] = list(posted_uids)[-5000:]
+                _save_state(state)
                 time.sleep(1.0)
             except Exception as ex:
                 print("Error sending:", ex)
