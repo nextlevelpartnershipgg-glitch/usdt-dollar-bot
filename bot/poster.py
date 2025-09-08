@@ -16,18 +16,19 @@ CHANNEL_NAME   = os.environ.get("CHANNEL_NAME", "USDT=Dollar")
 CHANNEL_HANDLE = os.environ.get("CHANNEL_HANDLE", "@usdtdollarm")
 CHANNEL_LINK   = os.environ.get("CHANNEL_LINK", f"https://t.me/{CHANNEL_HANDLE.lstrip('@')}")
 
-MAX_POSTS_PER_RUN  = int(os.environ.get("MAX_POSTS_PER_RUN", "1"))  # 1 пост за прогон
+MAX_POSTS_PER_RUN  = int(os.environ.get("MAX_POSTS_PER_RUN", "1"))
 LOOKBACK_MINUTES   = int(os.environ.get("LOOKBACK_MINUTES", "30"))
 FRESH_WINDOW_MIN   = int(os.environ.get("FRESH_WINDOW_MIN", "25"))
 MIN_EVENT_YEAR     = int(os.environ.get("MIN_EVENT_YEAR", "2023"))
 
-# фолбэк: если свежих нет — взять самое новое за N минут
+# фолбэк и режим «всегда постить»
 FALLBACK_ON_NO_FRESH = os.environ.get("FALLBACK_ON_NO_FRESH", "1") == "1"
 FALLBACK_WINDOW_MIN  = int(os.environ.get("FALLBACK_WINDOW_MIN", "360"))  # 6 часов
+ALWAYS_POST          = os.environ.get("ALWAYS_POST", "1") == "1"
 
 DATA_DIR = pathlib.Path("data"); DATA_DIR.mkdir(parents=True, exist_ok=True)
 STATE_FILE   = DATA_DIR / "state.json"
-HISTORY_FILE = DATA_DIR / "history.json"   # для дайджестов
+HISTORY_FILE = DATA_DIR / "history.json"
 
 UA = {"User-Agent":"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/125 Safari/537.36"}
 
@@ -171,7 +172,7 @@ def translate_hard_ru(text: str, timeout=14) -> str:
 def ensure_russian(text: str) -> str:
     return translate_hard_ru(text) if detect_lang(text) == "en" else text
 
-# ====== Сущности и теги ======
+# ====== Сущности/теги ======
 COMPANY_HINTS = ["Apple","Microsoft","Tesla","Meta","Google","Alphabet","Amazon","Nvidia","Samsung","Intel","Huawei",
                  "Газпром","Сбербанк","Яндекс","Роснефть","Лукойл","Норникель","Татнефть","Новатэк","ВТБ","Сургутнефтегаз"]
 TICKER_PAT = re.compile(r"\b[A-Z]{2,6}\b")
@@ -230,7 +231,7 @@ def gen_hidden_tags(title, body, entities, min_tags=3, max_tags=5):
     if any(k in text_l for k in ["доллар","usd","евро","eur","рубл","rub","юань","cny","курс","форекс"]): tadd("валюта")
     if any(k in text_l for k in ["акци","рынок","бирж","индекс","nasdaq","nyse","s&p","sp500","dow"]): tadd("рынки")
     if any(k in text_l for k in ["ставк","фрс","цб","инфляц","cpi","ppi","qe","qt"]): tadd("ставки")
-    if any(k in text_l for k in ["нефть","брент","wti","opec","газ","энерги","lng"]): tadd("энергетика")
+    if any(k in текст_l for k in ["нефть","брент","wti","opec","газ","энерги","lng"]): tadd("энергетика")
     if any(k in text_l for k in ["санкц","эмбарго","пошлин","геополит","переговор","президент"]): tadd("геополитика")
     nouns=extract_candidate_nouns(title+" "+body, entities, limit=12)
     result=[]
@@ -249,7 +250,7 @@ def gen_hidden_tags(title, body, entities, min_tags=3, max_tags=5):
             if len(tags)>=min_tags: break
     return "||"+" ".join(tags[:max_tags])+"||"
 
-# ====== Градиент (случайный, +30% яркость/контраст) ======
+# ====== Градиент фона ======
 PALETTES = [((32,44,80),(12,16,28)),((16,64,88),(8,20,36)),((82,30,64),(14,12,24)),
             ((20,88,72),(8,24,22)),((90,60,22),(20,16,12)),((44,22,90),(16,12,32)),((24,26,32),(12,14,18))]
 def _boost(c, factor=1.3): return tuple(max(0, min(255, int(v*factor))) for v in c)
@@ -276,7 +277,7 @@ def random_gradient(w=1080, h=540):
     img = Image.composite(img, Image.new("RGB",(w,h),(0,0,0)), mask)
     return img
 
-# ====== Рерайт и парсинг статей ======
+# ====== Рерайт и парсинг ======
 RU_TONE_REWRITE=[(r"\bсказал(а|и)?\b","сообщил\\1"),(r"\bзаявил(а|и)?\b","отметил\\1"),
                  (r"\bпо словам\b","по данным"),(r"\bпо мнению\b","согласно оценкам"),
                  (r"\bпримерно\b","порядка"),(r"\bочень\b","существенно"),(r"\bсильно\b","значительно")]
@@ -375,7 +376,7 @@ def draw_title_card(title_text, src_domain, tzname, event_dt_utc, post_dt_utc):
     d.text((48,26),CHANNEL_NAME,fill=(255,255,255),font=f_brand)
     try: tz=ZoneInfo(tzname)
     except Exception: tz=ZoneInfo("UTC")
-    ev=event_dt_utc.astimezone(tz).strftime("%d.%m %H:%M")
+    ev=event_dt_utc.astimezone(tz).strftime("%d.%m %H:%М")
     po=post_dt_utc.astimezone(tz).strftime("%d.%m %H:%M")
     right=f"пост: {po}"
     d.text((W-48-d.textlength(right,font=f_time),28),right,fill=(255,255,255),font=f_time)
@@ -389,7 +390,7 @@ def draw_title_card(title_text, src_domain, tzname, event_dt_utc, post_dt_utc):
     d.text((72,H-64),f"source: {src_domain}  •  событие: {ev}",font=f_small,fill=(230,230,230))
     bio=io.BytesIO(); bg.save(bio,format="PNG",optimize=True); bio.seek(0); return bio
 
-# ====== Подписи и отправка ======
+# ====== Подписи/отправка ======
 def build_caption_short(title, event_dt_utc, post_dt_utc):
     title = clamp(title, 160)
     tz = ZoneInfo(TIMEZONE)
@@ -400,36 +401,29 @@ def build_caption_short(title, event_dt_utc, post_dt_utc):
 def build_body_text(title, p1, p2, p3, link, hidden_tags):
     dom = root_domain(link) if link else None
     parts = [f"*{clamp(title, 200)}*", "", f"{p1}\n\n{p2}\n\n{p3}"]
-    if dom:
-        parts += ["", f"Источник: [{dom}]({link})"]
+    if dom: parts += ["", f"Источник: [{dom}]({link})"]
     parts += ["", f"🪙 [{CHANNEL_NAME}]({CHANNEL_LINK})"]
-    if hidden_tags:
-        parts += ["", hidden_tags]
+    if hidden_tags: parts += ["", hidden_tags]
     text = "\n".join(parts)
-    if len(text) > 4000:
-        text = text[:3996] + "…"
+    if len(text) > 4000: text = text[:3996] + "…"
     return text
 
 def send_photo(photo_bytes, caption):
     if not BOT_TOKEN:
-        raise RuntimeError("Нет BOT_TOKEN (добавь секрет в Settings → Secrets → Actions)")
+        raise RuntimeError("Нет BOT_TOKEN")
     url=f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
     files={"photo":("cover.png",photo_bytes,"image/png")}
     data={"chat_id":CHANNEL_ID,"caption":caption,"parse_mode":"Markdown"}
-    r=requests.post(url,files=files,data=data,timeout=30)
-    print("Telegram photo:", r.status_code, r.text[:200])
-    r.raise_for_status()
-    return r.json()
+    r=requests.post(url,files=files,data=data,timeout=30); print("Telegram photo:", r.status_code, r.text[:200])
+    r.raise_for_status(); return r.json()
 
 def send_text(text):
     if not BOT_TOKEN:
         raise RuntimeError("Нет BOT_TOKEN")
     url=f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data={"chat_id":CHANNEL_ID,"text":text,"parse_mode":"Markdown","disable_web_page_preview":True}
-    r=requests.post(url,data=data,timeout=30)
-    print("Telegram text:", r.status_code, r.text[:200])
-    r.raise_for_status()
-    return r.json()
+    r=requests.post(url,data=data,timeout=30); print("Telegram text:", r.status_code, r.text[:200])
+    r.raise_for_status(); return r.json()
 
 # ====== Сбор фидов ======
 def collect_entries():
@@ -446,14 +440,11 @@ def collect_entries():
             ts=getattr(e,"published",getattr(e,"updated","")) or ""
             try:
                 dt=dtparse.parse(ts)
-                if not dt.tzinfo:
-                    dt=dt.replace(tzinfo=timezone.utc)
-                else:
-                    dt=dt.astimezone(timezone.utc)
+                if not dt.tzinfo: dt=dt.replace(tzinfo=timezone.utc)
+                else: dt=dt.astimezone(timezone.utc)
             except Exception:
                 dt=datetime(1970,1,1,tzinfo=timezone.utc)
-            if dt.year<MIN_EVENT_YEAR:
-                continue
+            if dt.year<MIN_EVENT_YEAR: continue
             uid=hashlib.sha256((link+"|"+title+"|"+ts).encode("utf-8")).hexdigest()
             items.append({"feed":feed_url,"link":link,"title":title or "(no title)",
                           "summary":summary,"ts":ts,"dt":dt,"uid":uid})
@@ -468,12 +459,10 @@ def process_item(item, now_utc):
     entities=extract_entities(title_ru, f"{p1} {p2} {p3}")
     hidden_tags=gen_hidden_tags(title_ru, f"{p1} {p2} {p3}", entities, min_tags=3, max_tags=5)
 
-    # 1) карточка
     card=draw_title_card(title_ru, domain(link or ""), TIMEZONE, event_dt, now_utc)
     caption_short=build_caption_short(title_ru, event_dt, now_utc)
     resp_photo=send_photo(card, caption_short)
 
-    # 2) тело поста отдельным сообщением, без превью ссылки
     body=build_body_text(title_ru, p1, p2, p3, link or "", hidden_tags)
     resp_text=send_text(body)
 
@@ -495,8 +484,8 @@ def main():
     posted=set(state.get("posted_uids", []))
     items=collect_entries()
     if not items:
-        print("No entries.")
-        return
+        print("No entries."); return
+
     now_utc=datetime.now(timezone.utc)
     lookback_dt=now_utc - timedelta(minutes=LOOKBACK_MINUTES)
     fresh_cutoff=now_utc - timedelta(minutes=FRESH_WINDOW_MIN)
@@ -505,7 +494,7 @@ def main():
 
     to_post = fresh[:MAX_POSTS_PER_RUN]
 
-    # фолбэк, если свежих нет
+    # фолбэк: самое новое за N минут
     if not to_post and FALLBACK_ON_NO_FRESH:
         fallback_cutoff = now_utc - timedelta(minutes=FALLBACK_WINDOW_MIN)
         candidates = [it for it in items if it["uid"] not in posted and it["dt"] >= fallback_cutoff]
@@ -513,13 +502,17 @@ def main():
         to_post = candidates[:MAX_POSTS_PER_RUN]
         if to_post:
             print(f"Fallback used: took newest item(s) within {FALLBACK_WINDOW_MIN} min.")
-        else:
-            print("Nothing to post even with fallback window.")
-            return
+
+    # режим «всегда постить»
+    if not to_post and ALWAYS_POST:
+        anyc = [it for it in items if it["uid"] not in posted]
+        anyc.sort(key=lambda x: x["dt"], reverse=True)
+        to_post = anyc[:MAX_POSTS_PER_RUN]
+        if to_post:
+            print("ALWAYS_POST used: took newest item regardless of time window.")
 
     if not to_post:
-        print("Nothing new in fresh window.")
-        return
+        print("Nothing to post (fresh window + fallback disabled/empty)."); return
 
     for it in to_post:
         try:
