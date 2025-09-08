@@ -405,18 +405,30 @@ def smart_join_and_trim(paragraphs, max_len=1024):
 
 def build_full_caption(title, p1, p2, p3, link, hidden_tags):
     dom = root_domain(link) if link else "источник"
-    title_html = f"<b>{html_escape(title)}</b>"
-    body_plain = smart_join_and_trim([p1, p2, p3], max_len=1024 - 220)
-    body_html = html_escape(body_plain).replace("\n", "<br>")
-    footer_html = f'Источник: {html_escape(dom)}<br><br>🪙 <a href="{html_escape(CHANNEL_LINK)}">{html_escape(CHANNEL_NAME)}</a>'
-    caption_no_tags = f"{title_html}<br><br>{body_html}<br><br>{footer_html}"
 
+    # Заголовок жирным
+    title_html = f"<b>{html_escape(title)}</b>"
+
+    # Тело — без <br>, используем обычные переводы строк
+    body_plain = smart_join_and_trim([p1, p2, p3], max_len=1024 - 220)
+    body_html = html_escape(body_plain)  # переносы уже \n\n
+
+    footer = [
+        f"Источник: {html_escape(dom)}",
+        f'🪙 <a href="{html_escape(CHANNEL_LINK)}">{html_escape(CHANNEL_NAME)}</a>'
+    ]
+
+    caption_no_tags = f"{title_html}\n\n{body_html}\n\n" + "\n".join(footer)
+
+    # скрытые теги как спойлер
     if hidden_tags:
-        inner = hidden_tags.strip("|")  # "||...||" -> "..."; хэштеги останутся текстом
-        spoiler_html = f'<br><br><span class="tg-spoiler">{html_escape(inner)}</span>'
+        inner = hidden_tags.strip("|")  # "||#a #b||" -> "#a #b"
+        spoiler_html = f'\n\n<span class="tg-spoiler">{html_escape(inner)}</span>'
         if len(caption_no_tags + spoiler_html) <= 1024:
             return caption_no_tags + spoiler_html
+
     return caption_no_tags
+
 
 def send_photo_with_caption(photo_bytes, caption):
     if not BOT_TOKEN:
