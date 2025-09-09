@@ -1,8 +1,8 @@
 # bot/poster.py
-import os, io, re, random, time, json, hashlib, urllib.parse
+import os, io, re, random, time, json, hashlib, urllib.parse, math
 from datetime import datetime
 import requests, feedparser
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 # ========= Конфиг из Secrets / Env =========
 BOT_TOKEN   = os.getenv("BOT_TOKEN", "").strip()                 # токен из BotFather
@@ -11,6 +11,9 @@ MAX_POSTS_PER_RUN   = int(os.getenv("MAX_POSTS_PER_RUN", "1"))   # скольк�
 HTTP_TIMEOUT        = 12                                         # таймаут HTTP, сек
 LOW_QUALITY_MIN_LEN = int(os.getenv("LOW_QUALITY_MIN_LEN", "200"))
 ALLOW_BACKLOG       = os.getenv("ALLOW_BACKLOG", "1") == "1"     # брать «из запаса», если свежих нет
+
+# путь к логотипу (опционально). Если файла нет — нарисуем «монету».
+LOGO_PATH = os.getenv("LOGO_PATH", "bot/logo.png")
 
 # ========= Русские источники (без РИА) =========
 RSS_FEEDS = [
@@ -144,16 +147,36 @@ def extract_tags_source(text, min_tags=3, max_tags=5):
     while len(tags) < min_tags and "рынки" not in tags: tags.append("рынки")
     return "||" + " ".join("#"+t for t in tags[:max_tags]) + "||"
 
-# ========= Карточка: случайный градиент + заголовок =========
-PALETTES = [((32,44,80),(12,16,28)), ((16,64,88),(8,20,36)), ((82,30,64),(14,12,24)),
-            ((20,88,72),(8,24,22)), ((90,60,22),(20,16,12)), ((44,22,90),(16,12,32)),
-            ((24,26,32),(12,14,18))]
+# ========= Тематические палитры =========
+# каждая палитра: (верхний_цвет, нижний_цвет)
+PALETTES_GENERAL = [((28,42,74),(12,18,30)), ((18,64,96),(8,24,36)), ((84,32,68),(18,12,28))]
+PALETTES_ECON    = [((6,86,70),(4,40,36)), ((16,112,84),(8,36,28))]
+PALETTES_CRYPTO  = [((36,44,84),(16,18,40)), ((32,110,92),(14,28,32))]
+PALETTES_POLIT   = [((98,36,36),(24,12,14)), ((52,22,90),(16,12,34))]
+PALETTES_ENERGY  = [((124,72,16),(22,16,10)), ((88,46,18),(16,12,10))]
+PALETTES_TRAGIC  = [((40,40,40),(8,8,10)), ((54,54,64),(14,14,20))]
+
+def pick_palette(title_summary: str):
+    t = (title_summary or "").lower()
+    if any(k in t for k in ["взрыв","катастроф","авар","погиб","бомб","теракт","шторм","урага"]):
+        base = PALETTES_TRAGIC
+    elif any(k in t for k in ["нефть","газ","opec","брент","энерги","уголь","электро"]):
+        base = PALETTES_ENERGY
+    elif any(k in t for k in ["ставк","цб","инфляц","cpi","ppi","налог","бюджет","ввп"]):
+        base = PALETTES_ECON
+    elif any(k in t for k in ["крипт","биткоин","bitcoin","eth","стейбл","тезер","usdt"]):
+        base = PALETTES_CRYPTO
+    elif any(k in t for k in ["выборы","санкц","парламент","правительств","президент","мид"]):
+        base = PALETTES_POLIT
+    else:
+        base = PALETTES_GENERAL
+    return random.choice(base)
 
 def _boost(c, k=1.3): return tuple(max(0, min(255, int(v*k))) for v in c)
 
-def generate_gradient(size=(1080, 540)):
+def generate_gradient(size=(1080, 540), title_summary: str = ""):
     W,H = size
-    top, bottom = random.choice(PALETTES)
+    top, bottom = pick_palette(title_summary)
     top, bottom = _boost(top,1.3), _boost(bottom,1.3)
     img = Image.new("RGB", (W,H))
     d = ImageDraw.Draw(img)
@@ -163,6 +186,13 @@ def generate_gradient(size=(1080, 540)):
         g = int(top[1]*(1-t) + bottom[1]*t)
         b = int(top[2]*(1-t) + bottom[2]*t)
         d.line([(0,y),(W,y)], fill=(r,g,b))
+    # лёгкая диагональная текстура
+    overlay = Image.new("RGBA",(W,H),(0,0,0,0))
+    od = ImageDraw.Draw(overlay)
+    step = 20
+    for x in range(-H, W, step):
+        od.line([(x,0),(x+H,H)], fill=(255,255,255,18), width=1)
+    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
     return img
 
 def _font(path: str, size: int):
@@ -186,43 +216,87 @@ def wrap_by_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeType
     if cur and len(lines) < max_lines: lines.append(cur)
     return lines
 
-def draw_card(title: str, source_domain: str, post_stamp: str) -> io.BytesIO:
-    W,H = 1080, 540
-    img = generate_gradient((W,H)).convert("RGBA")
-    overlay = Image.new("RGBA",(W,H),(0,0,0,0))
-    ImageDraw.Draw(overlay).rounded_rectangle([40,110,W-40,H-90], radius=28, fill=(0,0,0,118))
-    img = Image.alpha_composite(img, overlay).convert("RGB")
+def _safe_open_logo():
+    if not os.path.exists(LOGO_PATH):
+        return None
+    try:
+        img = Image.open(LOGO_PATH).convert("RGBA")
+        # приводим к кругу
+        size = min(img.size)
+        img = ImageOps.fit(img, (size, size), method=Image.LANCZOS)
+        mask = Image.new("L", (size, size), 0)
+        ImageDraw.Draw(mask).ellipse((0,0,size,size), fill=255)
+        img.putalpha(mask)
+        return img
+    except Exception:
+        return None
+
+def _draw_fallback_coin(size=96):
+    # рисуем монету, если нет файла логотипа
+    r = size//2
+    img = Image.new("RGBA", (size,size), (0,0,0,0))
     d = ImageDraw.Draw(img)
+    d.ellipse((0,0,size,size), fill=(210,210,210,255))
+    d.ellipse((8,8,size-8,size-8), fill=(235,235,235,255))
+    # знак $
+    font = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size//2)
+    w = d.textlength("$", font=font)
+    d.text(((size-w)/2, size*0.26), "$", font=font, fill=(60,60,60,255))
+    return img
 
-    font_bold = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 34)
-    font_reg  = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 20)
+def draw_card(title: str, source_domain: str, post_stamp: str, themed_hint: str = "") -> io.BytesIO:
+    W,H = 1080, 540
+    base = generate_gradient((W,H), title_summary=themed_hint).convert("RGBA")
 
-    d.text((48, 26), "USDT=Dollar", font=font_bold, fill=(255,255,255))
+    # верхняя плашка
+    header = Image.new("RGBA", (W, 84), (0,0,0,80))
+    base.alpha_composite(header, (0,0))
+
+    d = ImageDraw.Draw(base)
+    font_bold = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
+    font_reg  = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 22)
+
+    # логотип
+    logo = _safe_open_logo() or _draw_fallback_coin(72)
+    base.alpha_composite(logo, (36, 6))
+
+    # название канала и время поста
+    d.text((120, 22), "USDT=Dollar", font=font_bold, fill=(255,255,255,255))
     right = f"пост: {post_stamp}"
-    d.text((W-48-d.textlength(right,font=font_reg), 28), right, font=font_reg, fill=(255,255,255))
+    d.text((W-36-d.textlength(right,font=font_reg), 28), right, font=font_reg, fill=(255,255,255,230))
+
+    # полупрозрачная подложка под заголовок
+    pad = Image.new("RGBA", (W-72, H-84-86), (0,0,0,110))
+    base.alpha_composite(pad, (36, 100))
 
     # заголовок
     title = (title or "").strip()
-    box_x, box_y = 72, 150
-    box_w, box_h = W-2*box_x, H-box_y-120
+    box_x, box_y = 64, 124
+    box_w, box_h = W-2*box_x, H- box_y - 132
     size = 64; lines = []
     while size >= 28:
         f = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size)
-        lines = wrap_by_width(d, title, f, box_w, max_lines=5)
+        lines = wrap_by_width(d, title, f, box_w, max_lines=4)
         line_h = f.getbbox("Ag")[3]
         total_h = len(lines)*line_h + (len(lines)-1)*8
         if lines and total_h <= box_h: break
         size -= 2
     y = box_y
     for ln in lines:
-        d.text((box_x, y), ln, font=f, fill=(255,255,255))
+        # небольшая «тень» для читаемости
+        d.text((box_x+2, y+2), ln, font=f, fill=(0,0,0,120))
+        d.text((box_x, y), ln, font=f, fill=(255,255,255,255))
         y += f.getbbox("Ag")[3] + 8
 
-    # низ
-    d.text((72, H-64), f"source: {source_domain}", font=font_reg, fill=(230,230,230))
+    # нижний футер
+    footer_h = 70
+    footer = Image.new("RGBA", (W, footer_h), (0,0,0,84))
+    base.alpha_composite(footer, (0, H-footer_h))
+    d = ImageDraw.Draw(base)
+    d.text((36, H-48), f"source: {source_domain}", font=font_reg, fill=(230,230,230,230))
 
     bio = io.BytesIO()
-    img.save(bio, format="PNG", optimize=True)
+    base.convert("RGB").save(bio, format="PNG", optimize=True)
     bio.seek(0)
     return bio
 
@@ -299,7 +373,7 @@ def build_three_paragraphs_scientific(title, summary_text):
     p3 = tidy_paragraph(p3) if p3 else ""
     return p1, p2, p3
 
-# ========= Главный цикл =========
+# ========= Поток обработки =========
 def _process_entries(entries, state, posted_uids, batch_seen, now, posted):
     for e in entries:
         if posted[0] >= MAX_POSTS_PER_RUN:
@@ -323,7 +397,8 @@ def _process_entries(entries, state, posted_uids, batch_seen, now, posted):
             print("Skip low-quality item:", title_ru[:90]); continue
 
         domain = re.sub(r"^www\.", "", link.split("/")[2]) if link else "source"
-        card   = draw_card(title_ru, domain, now)
+        themed_hint = (title_ru + " " + summary)
+        card   = draw_card(title_ru, domain, now, themed_hint=themed_hint)
         hidden = extract_tags_source(title_ru + " " + summary, 3, 5)
         caption = build_full_caption(title_ru, p1, p2, p3, link, hidden)
 
@@ -342,10 +417,10 @@ def main():
     state = _load_state()
     posted_uids = set(state.get("posted", []))
     batch_seen  = set()
-    posted = [0]  # списком, чтобы изменять по ссылке
+    posted = [0]
     now = datetime.now().strftime("%d.%m %H:%M")
 
-    # 1) основной проход — ищем свежие
+    # 1) основной проход
     for feed_url in RSS_FEEDS:
         try:
             fp = feedparser.parse(feed_url)
@@ -355,7 +430,7 @@ def main():
         if posted[0] >= MAX_POSTS_PER_RUN:
             break
 
-    # 2) бэкап-режим — берём ближайшее не опубликованное (чтобы пост был раз в 10 минут)
+    # 2) бэкап-режим
     if posted[0] == 0 and ALLOW_BACKLOG:
         print("No fresh posts. Trying backlog mode...")
         for feed_url in RSS_FEEDS:
