@@ -4,16 +4,18 @@ from datetime import datetime
 import requests, feedparser
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
-# ========= Конфиг =========
+# ================== БАЗОВЫЙ КОНФИГ ==================
 BOT_TOKEN   = os.getenv("BOT_TOKEN", "").strip()
-CHANNEL_ID  = os.getenv("CHANNEL_ID", "").strip()          # @имя_канала
+CHANNEL_ID  = os.getenv("CHANNEL_ID", "").strip()             # например: @usdtdollarm
 MAX_POSTS_PER_RUN   = int(os.getenv("MAX_POSTS_PER_RUN", "1"))
 HTTP_TIMEOUT        = 12
+LOGO_PATH           = os.getenv("LOGO_PATH", "bot/logo.png")
 LOW_QUALITY_MIN_LEN = int(os.getenv("LOW_QUALITY_MIN_LEN", "200"))
 ALLOW_BACKLOG       = os.getenv("ALLOW_BACKLOG", "1") == "1"
-LOGO_PATH = os.getenv("LOGO_PATH", "bot/logo.png")
 
-# ========= Русские источники (без РИА) =========
+STATE_PATH = "data/state.json"
+
+# Только русские источники (РИА не включаем)
 RSS_FEEDS = [
     "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
     "https://rssexport.rbc.ru/rbcnews/economics/30/full.rss",
@@ -41,17 +43,13 @@ RSS_FEEDS = [
     "https://www.mskagency.ru/rss/all",
     "https://www.ng.ru/rss/",
     "https://www.mk.ru/rss/finance/index.xml",
-    "https://www.kommersant.ru/RSS/regions.xml",
-    "https://www.kommersant.ru/RSS/tech.xml",
     "https://www.fontanka.ru/fontanka.rss",
     "https://minfin.gov.ru/ru/press-center/?rss=Y",
     "https://cbr.ru/StaticHtml/Rss/Press",
     "https://www.moex.com/Export/MRSS/News",
 ]
 
-# ========= Состояние (анти-дубли) =========
-STATE_PATH = "data/state.json"
-
+# ================== УТИЛИТЫ СОСТОЯНИЯ ==================
 def _norm_url(u: str) -> str:
     if not u: return ""
     p = urllib.parse.urlsplit(u)
@@ -75,16 +73,14 @@ def _save_state(state):
     with open(STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
-# ========= Текстовые утилиты =========
+# ================== ТЕКСТ: ОБЩЕЕ ==================
 def detect_lang(text: str) -> str:
     return "ru" if re.search(r"[А-Яа-яЁё]", text or "") else "non-ru"
 
 def split_sentences(text: str):
     text = re.sub(r"\s+", " ", (text or "").strip())
     if not text: return []
-    # делим по точке/воскл/вопрос/многоточие
     parts = re.split(r"(?<=[\.\!\?])\s+", text)
-    # чистим html сущности
     parts = [re.sub(r"&nbsp;|&mdash;", " ", p) for p in parts]
     return [p.strip() for p in parts if p.strip()]
 
@@ -130,10 +126,28 @@ def tidy_paragraph(p: str) -> str:
     if not p: return p
     p = _balance_brackets_and_quotes(p)
     p = _smart_capitalize(p)
-    # точки/пробелы
     p = re.sub(r"\s+([,.:;!?])", r"\1", p)
     p = re.sub(r"\s+", " ", p).strip()
     return p
+
+def _normalize_for_cmp(s: str) -> str:
+    s = re.sub(r"&nbsp;|&mdash;", " ", s or "")
+    s = re.sub(r"\s+", " ", s).strip().lower()
+    s = re.sub(r"[«»\"'`’]", "", s)
+    return s
+
+def dedupe_sentences(sents, title=""):
+    seen = set()
+    norm_title = _normalize_for_cmp(title)
+    out = []
+    for s in sents:
+        ns = _normalize_for_cmp(s)
+        if not ns: continue
+        if ns == norm_title: continue
+        if ns in seen: continue
+        seen.add(ns)
+        out.append(s.strip())
+    return out
 
 RU_STOP = set("это этот эта эти такой такая такое такие как по при про для на из от или либо ещё уже если когда куда где чем что чтобы и в во а но же тот та то те к с о об".split())
 
@@ -152,7 +166,7 @@ def extract_tags_source(text, min_tags=3, max_tags=5):
     while len(tags) < min_tags and "рынки" not in tags: tags.append("рынки")
     return "||" + " ".join("#"+t for t in tags[:max_tags]) + "||"
 
-# ========= Палитры/визуал =========
+# ================== ВИЗУАЛ ==================
 PALETTES_GENERAL = [((28,42,74),(12,18,30)), ((18,64,96),(8,24,36)), ((84,32,68),(18,12,28))]
 PALETTES_ECON    = [((6,86,70),(4,40,36)), ((16,112,84),(8,36,28))]
 PALETTES_CRYPTO  = [((36,44,84),(16,18,40)), ((32,110,92),(14,28,32))]
@@ -168,9 +182,9 @@ def pick_palette(title_summary: str):
         base = PALETTES_ENERGY
     elif any(k in t for k in ["ставк","цб","инфляц","cpi","ppi","налог","бюджет","ввп"]):
         base = PALETTES_ECON
-    elif any(k in t for k in ["крипт","биткоин","bitcoin","eth","стейбл","тезер","usdt"]):
+    elif any(k in t for k in ["крипт","биткоин","bitcoin","eth","стейбл","usdt"]):
         base = PALETTES_CRYPTO
-    elif any(k in t for k in ["выборы","санкц","парламент","правительств","президент","мид"]):
+    elif any(k in t for k in ["выборы","санкц","парламент","президент","мид"]):
         base = PALETTES_POLIT
     else:
         base = PALETTES_GENERAL
@@ -190,7 +204,6 @@ def generate_gradient(size=(1080, 540), title_summary: str = ""):
         g = int(top[1]*(1-t) + bottom[1]*t)
         b = int(top[2]*(1-t) + bottom[2]*t)
         d.line([(0,y),(W,y)], fill=(r,g,b))
-    # лёгкая диагональная текстура
     overlay = Image.new("RGBA",(W,H),(0,0,0,0))
     od = ImageDraw.Draw(overlay)
     step = 20
@@ -200,10 +213,8 @@ def generate_gradient(size=(1080, 540), title_summary: str = ""):
     return img
 
 def _font(path: str, size: int):
-    try:
-        return ImageFont.truetype(path, size)
-    except Exception:
-        return ImageFont.load_default()
+    try: return ImageFont.truetype(path, size)
+    except Exception: return ImageFont.load_default()
 
 def wrap_by_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont, max_w: int, max_lines=5):
     words = (text or "").split()
@@ -221,8 +232,7 @@ def wrap_by_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeType
     return lines
 
 def _safe_open_logo():
-    if not os.path.exists(LOGO_PATH):
-        return None
+    if not os.path.exists(LOGO_PATH): return None
     try:
         img = Image.open(LOGO_PATH).convert("RGBA")
         size = min(img.size)
@@ -248,7 +258,6 @@ def draw_card(title: str, source_domain: str, post_stamp: str, themed_hint: str 
     W,H = 1080, 540
     base = generate_gradient((W,H), title_summary=themed_hint).convert("RGBA")
 
-    # верхняя плашка
     header = Image.new("RGBA", (W, 84), (0,0,0,80))
     base.alpha_composite(header, (0,0))
 
@@ -256,20 +265,16 @@ def draw_card(title: str, source_domain: str, post_stamp: str, themed_hint: str 
     font_bold = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
     font_reg  = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 22)
 
-    # логотип
     logo = _safe_open_logo() or _draw_fallback_coin(72)
     base.alpha_composite(logo, (36, 6))
 
-    # название канала и время поста
     d.text((120, 22), "USDT=Dollar", font=font_bold, fill=(255,255,255,255))
     right = f"пост: {post_stamp}"
     d.text((W-36-d.textlength(right,font=font_reg), 28), right, font=font_reg, fill=(255,255,255,230))
 
-    # подложка под заголовок
     pad = Image.new("RGBA", (W-72, H-84-86), (0,0,0,110))
     base.alpha_composite(pad, (36, 100))
 
-    # заголовок
     title = (title or "").strip()
     box_x, box_y = 64, 124
     box_w, box_h = W-2*box_x, H- box_y - 132
@@ -287,7 +292,6 @@ def draw_card(title: str, source_domain: str, post_stamp: str, themed_hint: str 
         d.text((box_x, y), ln, font=f, fill=(255,255,255,255))
         y += f.getbbox("Ag")[3] + 8
 
-    # нижний футер
     footer_h = 70
     footer = Image.new("RGBA", (W, footer_h), (0,0,0,84))
     base.alpha_composite(footer, (0, H-footer_h))
@@ -299,26 +303,33 @@ def draw_card(title: str, source_domain: str, post_stamp: str, themed_hint: str 
     bio.seek(0)
     return bio
 
-# ========= Парафраз (без склейки слов) =========
+# ================== АГРЕССИВНЫЙ ПЕРЕФРАЗ ==================
+# Синонимы + фразы. Добавлять можно смело — регистр сохраняется.
 SYN_MAP = {
-    "сообщил":["заявил","уточнил","проинформировал"],
-    "сообщила":["заявила","уточнила","проинформировала"],
-    "сообщили":["заявили","уточнили","проинформировали"],
-    "заявил":["сообщил","отметил","подчеркнул"],
-    "заявила":["сообщила","отметила","подчеркнула"],
-    "заявили":["сообщили","отметили","подчеркнули"],
-    "ранее":["до этого","прежде"],
-    "также":["кроме того","вдобавок"],
-    "однако":["при этом","вместе с тем"],
+    "сообщил":["заявил","уточнил","проинформировал","подтвердил","рассказал"],
+    "сообщила":["заявила","уточнила","проинформировала","подтвердила","рассказала"],
+    "сообщили":["заявили","уточнили","проинформировали","подтвердили","рассказали"],
+    "заявил":["сообщил","отметил","подчеркнул","констатировал"],
+    "заявила":["сообщила","отметила","подчеркнула","констатировала"],
+    "заявили":["сообщили","отметили","подчеркнули","констатировали"],
+    "ранее":["прежде","до этого","раньше"],
+    "также":["кроме того","вдобавок","параллельно"],
+    "однако":["при этом","вместе с тем","тем не менее"],
     "из-за":["вследствие","по причине"],
-    "в результате":["в итоге"],
-    "в частности":["в том числе"],
-    "ожидается":["предполагается"],
-    "планируется":["намечается"],
-    "повышение":["рост"],
-    "снижение":["падение","сокращение"],
-    "рост":["увеличение"],
+    "в результате":["в итоге","как следствие"],
+    "в частности":["в том числе","например"],
+    "ожидается":["предполагается","прогнозируется"],
+    "планируется":["намечается","рассматривается"],
+    "повышение":["рост","увеличение"],
+    "снижение":["падение","сокращение","просадка"],
+    "рост":["увеличение","подъём"],
     "падение":["снижение","просадка"],
+    "поддержка":["содействие","подпитка"],
+    "санкции":["ограничения","рестрикции"],
+    "дополнительно":["плюс","кроме того"],
+    "причина":["фактор","основание"],
+    "сроки":["дедлайны","временные рамки"],
+    "решение":["шаг","меры","инициатива"],
 }
 
 PHRASES = [
@@ -326,6 +337,9 @@ PHRASES = [
     (r"\bна\s+данный\s+момент\b","сейчас"),
     (r"\bв\s+ближайшее\s+время\b","скоро"),
     (r"\bв\s+том\s+числе\b","включая"),
+    (r"\bсогласно\s+данным\b","по данным"),
+    (r"\bсообщается,\s+что\b","по сообщениям,"),
+    (r"\bкак\s+утверждают\b","по оценкам"),
 ]
 
 def _keep_case(src: str, repl: str) -> str:
@@ -333,13 +347,32 @@ def _keep_case(src: str, repl: str) -> str:
     if src[:1].isupper(): return repl[:1].upper() + repl[1:]
     return repl
 
-def paraphrase_ru(text: str, target_ratio: float = 0.5) -> str:
+def _swap_clauses(sent: str) -> str:
+    """
+    Простая инверсия: переносим обстоятельственный фрагмент в начало/конец.
+    """
+    s = sent
+    # варианты с "по данным/сообщается/как уточнили"
+    s = re.sub(r"(.+?),\s+(по данным|по сообщениям|как уточнили|как заявили)\s+([^,]+)", r"\2 \3, \1", s, flags=re.IGNORECASE)
+    # варианты со временем/местом
+    s = re.sub(r"(В\s+\S.+?)\s+(\w.+)", r"\2. \1", s) if random.random()<0.35 else s
+    return s
+
+def paraphrase_ru(text: str, target_ratio: float = 0.9) -> str:
+    """
+    Агрессивный перефраз с сохранением смысла.
+    - Массовая замена слов
+    - Инверсия простых конструкций
+    - Сборка нового текста из предложений
+    """
     if not text: return text
     original = text
 
+    # фразы целиком
     for pat, repl in PHRASES:
         text = re.sub(pat, repl, text, flags=re.IGNORECASE)
 
+    # побуквенная замена слов без потери пробелов/пунктуации
     words = text.split()
     idxs = [i for i,w in enumerate(words) if w.lower().strip(".,!?;:") in SYN_MAP]
     random.shuffle(idxs)
@@ -357,15 +390,34 @@ def paraphrase_ru(text: str, target_ratio: float = 0.5) -> str:
         repl = _keep_case(core, random.choice(opts))
         words[i] = repl + tail
         done += 1
+    text = " ".join(words)
 
-    res = " ".join(words)
+    # работа по предложениям — перестановки/склейки
+    sents = split_sentences(text)
+    out = []
+    for s in sents:
+        s = s.strip()
+        if not s: continue
+        if random.random() < 0.7:
+            s = _swap_clauses(s)
+        # пассив ↔ актив (простая эвристика)
+        s = re.sub(r"\bбыло\b\s+(\w+?)(о|а|и)\b", r"\1ли", s)
+        s = re.sub(r"\bбудет\b\s+(\w+?)(о|а|и)\b", r"планируется, что \1", s)
+        # чуть варьируем вводные
+        if random.random() < 0.4:
+            s = re.sub(r"^([А-ЯЁ].+?)\s+заявил[аи]?,", r"По их словам, \1,", s)
+        out.append(s)
+
+    res = " ".join(out)
     res = re.sub(r"\s+([,.:;!?])", r"\1", res)
     res = re.sub(r"\s+", " ", res).strip()
+
+    # хард-стоп: если вдруг получился слишком короткий или слишком похожий — возвращаем оригинал
     if len(res) < len(original)*0.6:
         return original
     return res
 
-# ========= Маркетинговая подача =========
+# ================== МАРКЕТИНГОВАЯ ПОДАЧА ==================
 def pick_emoji(text: str) -> str:
     t = (text or "").lower()
     if any(k in t for k in ["акци","индекс","бирж","рынок","nasdaq","moex","s&p"]): return "📈"
@@ -377,35 +429,47 @@ def pick_emoji(text: str) -> str:
     return "📰"
 
 def build_sections_marketing(title: str, summary_text: str):
-    """Возвращает: lead, details, conclusion (все уже tidy + перефраз)"""
-    sents = split_sentences(summary_text)
+    sents_raw = split_sentences(summary_text)
+    sents = dedupe_sentences(sents_raw, title)
+    if not sents:
+        sents = split_sentences(summary_text)
 
-    # берем побольше фактов, но без перегруза
-    core = sents[:8] if len(sents) >= 8 else sents
-    text_core = " ".join(core)
+    lead_sents    = sents[:2] if sents else [title]
+    details_sents = sents[2:10] if len(sents) > 2 else []
 
-    # перефраз, но мягкий для заголовка/лида
-    title_p = tidy_paragraph(paraphrase_ru(title, 0.35))
-    emoji = pick_emoji(title + " " + text_core)
-    lead = tidy_paragraph(f"{emoji} {paraphrase_ru(' '.join(sents[:2]) or title, 0.45)}")
+    # вычистим пересечения
+    lead_norm_set = {_normalize_for_cmp(x) for x in lead_sents}
+    details_sents = [s for s in details_sents if _normalize_for_cmp(s) not in lead_norm_set]
 
-    # детали (развёрнуто)
-    details = tidy_paragraph(paraphrase_ru(text_core, 0.55))
+    # источники для перефраза
+    lead_src    = " ".join(lead_sents) or title
+    details_src = (" ".join(details_sents)).strip()
 
-    # аккуратный довод (без домыслов)
+    # агрессивный перефраз
+    title_p = tidy_paragraph(paraphrase_ru(title, 0.85))
+    emoji   = pick_emoji(title + " " + summary_text)
+
+    lead    = tidy_paragraph(f"{emoji} {paraphrase_ru(lead_src, 0.92)}")
+    details = tidy_paragraph(paraphrase_ru(details_src, 0.95)) if details_src else ""
+
+    # если вдруг совпали — докрутим
+    if _normalize_for_cmp(details) == _normalize_for_cmp(lead):
+        details = tidy_paragraph(paraphrase_ru(details_src, 0.97))
+
+    # аккуратный довод
     t = (title + " " + summary_text).lower()
-    if any(k in t for k in ["сократ","урез","снял финанс","эконом","дефицит","санкц"]):
-        concl = "Ситуация может сократить внешние вливания и сместить приоритеты бюджетов — рынки будут следить за официальными решениями и сроками."
-    elif any(k in t for k in ["расшир","увелич","поддерж","одобр","инвест"]):
-        concl = "Решение создаёт пространство для дополнительной активности участников и может поддержать ожидания по сектору."
+    if any(k in t for k in ["сократ","урез","замороз","дефицит","санкц"]):
+        concl = "Контекст: приоритеты смещаются к внутренним задачам — ждём официальных разъяснений по объёму и календарю мер."
+    elif any(k in t for k in ["расшир","увелич","поддерж","одобр","инвест","запуст"]):
+        concl = "Контекст: шаг добавляет импульс теме; масштаб и сроки внедрения определят эффект для отрасли."
     elif any(k in t for k in ["рис", "авар", "шторм", "теракт", "катастроф"]):
-        concl = "Фокус — на управлении рисками и оперативных мерах. Оценка последствий будет уточняться по мере поступления подтверждённых данных."
+        concl = "Контекст: в фокусе управление рисками и оперативные действия; последствия уточнятся по мере появления проверенной информации."
     else:
-        concl = "Контекст требует наблюдения: реакции участников и официальные комментарии прояснят среднесрочные эффекты."
+        concl = "Контекст: следим за реакцией участников и последующими комментариями — они зададут тон на ближайшую перспективу."
 
     return title_p, lead, details, concl
 
-# ========= HTML/подпись =========
+# ================== HTML/ПОДПИСЬ ==================
 def html_escape(s: str) -> str:
     return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
@@ -424,7 +488,7 @@ def build_full_caption(title, lead, details, conclusion, link, hidden_tags):
 
     body = [
         html_escape(lead),
-        f"<b>Подробности:</b>\n{html_escape(details)}",
+        f"<b>Подробности:</b>\n{html_escape(details)}" if details else "",
         f"<b>Что это значит:</b>\n{html_escape(conclusion)}"
     ]
     body_text = smart_join_and_trim(body, max_len=1024-220)
@@ -433,7 +497,6 @@ def build_full_caption(title, lead, details, conclusion, link, hidden_tags):
         f'Источник: <a href="{html_escape(link)}">{html_escape(dom)}</a>',
         f'🪙 <a href="https://t.me/{CHANNEL_ID.lstrip("@")}">USDT=Dollar</a>'
     ]
-
     caption = f"{title_html}\n\n{body_text}\n\n" + "\n".join(footer)
 
     if hidden_tags:
@@ -441,20 +504,9 @@ def build_full_caption(title, lead, details, conclusion, link, hidden_tags):
         spoiler = f'\n\n<span class="tg-spoiler">{html_escape(inner)}</span>'
         if len(caption + spoiler) <= 1024:
             return caption + spoiler
+    return caption[:1024]
 
-    if len(caption) > 1024:
-        # ещё раз подрежем «Подробности»
-        body = [
-            html_escape(lead),
-            f"<b>Подробности:</b>\n{html_escape(details[:max(0, 600)])}",
-            f"<b>Что это значит:</b>\n{html_escape(conclusion)}"
-        ]
-        body_text = smart_join_and_trim(body, max_len=1024-220)
-        caption = f"{title_html}\n\n{body_text}\n\n" + "\n".join(footer)
-
-    return caption
-
-# ========= Отправка =========
+# ================== ОТПРАВКА ==================
 def send_photo_with_caption(photo_bytes: io.BytesIO, caption: str):
     if not BOT_TOKEN: raise RuntimeError("BOT_TOKEN не задан")
     if not CHANNEL_ID or not CHANNEL_ID.startswith("@"):
@@ -466,7 +518,7 @@ def send_photo_with_caption(photo_bytes: io.BytesIO, caption: str):
     print("Telegram sendPhoto:", r.status_code, r.text[:180])
     r.raise_for_status()
 
-# ========= Поток =========
+# ================== ПОТОК ==================
 def _process_entries(entries, state, posted_uids, batch_seen, now, posted):
     for e in entries:
         if posted[0] >= MAX_POSTS_PER_RUN:
@@ -483,7 +535,6 @@ def _process_entries(entries, state, posted_uids, batch_seen, now, posted):
         if uid in posted_uids or uid in batch_seen:
             continue
 
-        # маркетинговая подача
         title_p, lead, details, concl = build_sections_marketing(title, summary)
         body_len = len((lead + " " + details + " " + concl).strip())
         if body_len < LOW_QUALITY_MIN_LEN:
@@ -513,7 +564,6 @@ def main():
     posted = [0]
     now = datetime.now().strftime("%d.%m %H:%M")
 
-    # основной проход
     for feed_url in RSS_FEEDS:
         try:
             fp = feedparser.parse(feed_url)
@@ -523,7 +573,6 @@ def main():
         if posted[0] >= MAX_POSTS_PER_RUN:
             break
 
-    # бэкап
     if posted[0] == 0 and ALLOW_BACKLOG:
         print("No fresh posts. Trying backlog mode...")
         for feed_url in RSS_FEEDS:
