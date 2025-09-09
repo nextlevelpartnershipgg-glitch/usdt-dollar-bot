@@ -358,21 +358,46 @@ def _keep_case(src: str, repl: str) -> str:
 def paraphrase_ru(text: str, target_ratio: float = 0.5) -> str:
     """
     Осторожный перефраз:
-    - не трогаем числа/даты/проценты/валюты/URL/кавычки/имена (PROTECT_RE)
-    - заменяем до ~50% доступных слов по словарю
-    - чутка шлифуем фразы
+    - сохраняем пробелы и пунктуацию
+    - заменяем до ~50% слов
     """
-    if not text: return text
+    if not text:
+        return text
     original = text
 
-    # фразы-замены (регулярками)
+    # сначала простые фразы (регулярками)
     for pat, repl in PHRASES:
         text = re.sub(pat, repl, text, flags=re.IGNORECASE)
 
-    tokens = re.findall(r"\w+|[^\w\s]", text, flags=re.UNICODE)
-    protected_spans = []
-    for m in PROTECT_RE.finditer(text):
-        protected_spans.append((m.start(), m.end()))
+    words = text.split()
+    candidates = [i for i, w in enumerate(words) if w.lower().strip(".,!?;:") in SYN_MAP]
+
+    # сколько можно заменить
+    max_replace = max(1, int(len(candidates) * target_ratio))
+    random.shuffle(candidates)
+    replaced = 0
+
+    for i in candidates:
+        if replaced >= max_replace:
+            break
+        clean = words[i].strip(".,!?;:")
+        punct = words[i][len(clean):] if words[i].endswith(tuple(".,!?;:")) else ""
+        opts = SYN_MAP.get(clean.lower())
+        if opts:
+            repl = random.choice(opts)
+            repl = _keep_case(clean, repl)
+            words[i] = repl + punct
+            replaced += 1
+
+    res = " ".join(words)
+
+    # лёгкая чистка
+    res = re.sub(r"\s+([,.:;!?])", r"\1", res)
+    res = re.sub(r"\s+", " ", res).strip()
+
+    if len(res) < len(original) * 0.6:
+        return original
+    return res
 
     # функция «защищено ли это токеном»
     def is_protected(idx_in_text_start: int, idx_in_text_end: int) -> bool:
