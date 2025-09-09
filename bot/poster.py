@@ -1,21 +1,19 @@
 # bot/poster.py
-import os, io, re, random, time, json, hashlib, urllib.parse, math
+import os, io, re, random, time, json, hashlib, urllib.parse
 from datetime import datetime
 import requests, feedparser
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 # ========= Конфиг из Secrets / Env =========
-BOT_TOKEN   = os.getenv("BOT_TOKEN", "").strip()                 # токен из BotFather
-CHANNEL_ID  = os.getenv("CHANNEL_ID", "").strip()                # @имя_канала (НЕ id группы)
-MAX_POSTS_PER_RUN   = int(os.getenv("MAX_POSTS_PER_RUN", "1"))   # сколько новостей постим за запуск
-HTTP_TIMEOUT        = 12                                         # таймаут HTTP, сек
+BOT_TOKEN   = os.getenv("BOT_TOKEN", "").strip()
+CHANNEL_ID  = os.getenv("CHANNEL_ID", "").strip()          # @имя_канала
+MAX_POSTS_PER_RUN   = int(os.getenv("MAX_POSTS_PER_RUN", "1"))
+HTTP_TIMEOUT        = 12
 LOW_QUALITY_MIN_LEN = int(os.getenv("LOW_QUALITY_MIN_LEN", "200"))
-ALLOW_BACKLOG       = os.getenv("ALLOW_BACKLOG", "1") == "1"     # брать «из запаса», если свежих нет
+ALLOW_BACKLOG       = os.getenv("ALLOW_BACKLOG", "1") == "1"     # брать из запаса, если свежих нет
+LOGO_PATH = os.getenv("LOGO_PATH", "bot/logo.png")               # опционально: bot/logo.png
 
-# путь к логотипу (опционально). Если файла нет — нарисуем «монету».
-LOGO_PATH = os.getenv("LOGO_PATH", "bot/logo.png")
-
-# ========= Русские источники (без РИА) =========
+# ========= Источники (русские, без РИА) =========
 RSS_FEEDS = [
     "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
     "https://rssexport.rbc.ru/rbcnews/economics/30/full.rss",
@@ -147,8 +145,7 @@ def extract_tags_source(text, min_tags=3, max_tags=5):
     while len(tags) < min_tags and "рынки" not in tags: tags.append("рынки")
     return "||" + " ".join("#"+t for t in tags[:max_tags]) + "||"
 
-# ========= Тематические палитры =========
-# каждая палитра: (верхний_цвет, нижний_цвет)
+# ========= Тематические палитры и визуал =========
 PALETTES_GENERAL = [((28,42,74),(12,18,30)), ((18,64,96),(8,24,36)), ((84,32,68),(18,12,28))]
 PALETTES_ECON    = [((6,86,70),(4,40,36)), ((16,112,84),(8,36,28))]
 PALETTES_CRYPTO  = [((36,44,84),(16,18,40)), ((32,110,92),(14,28,32))]
@@ -221,7 +218,6 @@ def _safe_open_logo():
         return None
     try:
         img = Image.open(LOGO_PATH).convert("RGBA")
-        # приводим к кругу
         size = min(img.size)
         img = ImageOps.fit(img, (size, size), method=Image.LANCZOS)
         mask = Image.new("L", (size, size), 0)
@@ -231,17 +227,15 @@ def _safe_open_logo():
     except Exception:
         return None
 
-def _draw_fallback_coin(size=96):
-    # рисуем монету, если нет файла логотипа
+def _draw_fallback_coin(size=72):
     r = size//2
     img = Image.new("RGBA", (size,size), (0,0,0,0))
     d = ImageDraw.Draw(img)
     d.ellipse((0,0,size,size), fill=(210,210,210,255))
-    d.ellipse((8,8,size-8,size-8), fill=(235,235,235,255))
-    # знак $
+    d.ellipse((6,6,size-6,size-6), fill=(235,235,235,255))
     font = _font("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size//2)
     w = d.textlength("$", font=font)
-    d.text(((size-w)/2, size*0.26), "$", font=font, fill=(60,60,60,255))
+    d.text(((size-w)/2, size*0.24), "$", font=font, fill=(60,60,60,255))
     return img
 
 def draw_card(title: str, source_domain: str, post_stamp: str, themed_hint: str = "") -> io.BytesIO:
@@ -265,7 +259,7 @@ def draw_card(title: str, source_domain: str, post_stamp: str, themed_hint: str 
     right = f"пост: {post_stamp}"
     d.text((W-36-d.textlength(right,font=font_reg), 28), right, font=font_reg, fill=(255,255,255,230))
 
-    # полупрозрачная подложка под заголовок
+    # подложка под заголовок
     pad = Image.new("RGBA", (W-72, H-84-86), (0,0,0,110))
     base.alpha_composite(pad, (36, 100))
 
@@ -283,7 +277,6 @@ def draw_card(title: str, source_domain: str, post_stamp: str, themed_hint: str 
         size -= 2
     y = box_y
     for ln in lines:
-        # небольшая «тень» для читаемости
         d.text((box_x+2, y+2), ln, font=f, fill=(0,0,0,120))
         d.text((box_x, y), ln, font=f, fill=(255,255,255,255))
         y += f.getbbox("Ag")[3] + 8
@@ -300,7 +293,150 @@ def draw_card(title: str, source_domain: str, post_stamp: str, themed_hint: str 
     bio.seek(0)
     return bio
 
-# ========= Подпись к посту =========
+# ========= Парафраз (rule-based, безопасный) =========
+# Словарь синонимов: можно расширять.
+SYN_MAP = {
+    "сообщил": ["заявил", "уточнил", "проинформировал"],
+    "сообщила": ["заявила", "уточнила", "проинформировала"],
+    "сообщили": ["заявили", "уточнили", "проинформировали"],
+    "заявил": ["сообщил", "отметил", "подчеркнул"],
+    "заявила": ["сообщила", "отметила", "подчеркнула"],
+    "заявили": ["сообщили", "отметили", "подчеркнули"],
+    "сегодня": ["сегодня", "в этот день"],
+    "вчера": ["накануне"],
+    "ранее": ["до этого", "прежде"],
+    "также": ["кроме того", "вдобавок"],
+    "кроме": ["помимо"],
+    "однако": ["при этом", "вместе с тем"],
+    "из-за": ["вследствие", "по причине"],
+    "в связи с": ["из-за", "по причине"],
+    "в результате": ["итогом стало", "в итоге"],
+    "в том числе": ["включая"],
+    "при этом": ["однако", "вместе с тем"],
+    "по данным": ["согласно данным", "как следует из данных"],
+    "по словам": ["как заявил", "как отметили"],
+    "согласно": ["по", "в соответствии с"],
+    "в ходе": ["во время"],
+    "например": ["к примеру"],
+    "в частности": ["в том числе"],
+    "ситуация": ["обстановка", "положение"],
+    "меры": ["шаги"],
+    "планируется": ["намечается"],
+    "ожидается": ["предполагается"],
+    "привел": ["вызвал", "стал причиной"],
+    "привела": ["вызвала", "стала причиной"],
+    "привели": ["вызвали", "стали причиной"],
+    "повышение": ["рост"],
+    "снижение": ["падение", "сокращение"],
+    "рост": ["увеличение"],
+    "падение": ["снижение", "просадка"],
+    "продолжится": ["сохранится", "может продолжиться"],
+    "начался": ["стартовал", "запустился"],
+    "началась": ["стартовала", "запустилась"],
+    "началось": ["стартовало", "запустилось"],
+}
+
+PHRASES = [
+    (r"\bв\s+настоящее\s+время\b", "сейчас"),
+    (r"\bна\s+данный\s+момент\b", "сейчас"),
+    (r"\bв\s+ближайшее\s+время\b", "скоро"),
+    (r"\bв\s+том\s+числе\b", "включая"),
+    (r"\bпо\s+данным\b", "согласно данным"),
+]
+
+PROTECT_RE = re.compile(
+    r"(\d[\d\s\.,:%]*|\b[А-ЯЁ][а-яё]+(?:\s[А-ЯЁ][а-яё]+){0,2}\b|https?://\S+|«[^»]+»|\"[^\"]+\")"
+)
+
+def _keep_case(src: str, repl: str) -> str:
+    if src.isupper():
+        return repl.upper()
+    if src[:1].isupper():
+        return repl[:1].upper() + repl[1:]
+    return repl
+
+def paraphrase_ru(text: str, target_ratio: float = 0.5) -> str:
+    """
+    Осторожный перефраз:
+    - не трогаем числа/даты/проценты/валюты/URL/кавычки/имена (PROTECT_RE)
+    - заменяем до ~50% доступных слов по словарю
+    - чутка шлифуем фразы
+    """
+    if not text: return text
+    original = text
+
+    # фразы-замены (регулярками)
+    for pat, repl in PHRASES:
+        text = re.sub(pat, repl, text, flags=re.IGNORECASE)
+
+    tokens = re.findall(r"\w+|[^\w\s]", text, flags=re.UNICODE)
+    protected_spans = []
+    for m in PROTECT_RE.finditer(text):
+        protected_spans.append((m.start(), m.end()))
+
+    # функция «защищено ли это токеном»
+    def is_protected(idx_in_text_start: int, idx_in_text_end: int) -> bool:
+        for a,b in protected_spans:
+            if idx_in_text_start >= a and idx_in_text_end <= b:
+                return True
+        return False
+
+    # восстанавливаем позиции токенов в исходной строке
+    pos = 0
+    pieces = []
+    replaced = 0
+    candidates = 0
+    for tok in tokens:
+        start = text.find(tok, pos)
+        if start == -1:
+            start = pos
+        end = start + len(tok)
+
+        if tok.isalpha() and not is_protected(start, end):
+            low = tok.lower()
+            if low in SYN_MAP:
+                candidates += 1
+                pieces.append(("word", tok, start, end))
+            else:
+                pieces.append(("plain", tok, start, end))
+        else:
+            pieces.append(("plain", tok, start, end))
+        pos = end
+
+    max_replace = max(1, int(candidates * target_ratio))
+    out = []
+    for kind, tok, s, e in pieces:
+        if kind == "word":
+            low = tok.lower()
+            opts = SYN_MAP.get(low, [])
+            do = (replaced < max_replace) and (random.random() < 0.8) and opts
+            if do:
+                repl = random.choice(opts)
+                out.append(_keep_case(tok, repl))
+                replaced += 1
+            else:
+                out.append(tok)
+        else:
+            out.append(tok)
+
+    res = "".join(out)
+
+    # небольшой разброс синтаксиса: делим длинные предложения
+    res = re.sub(r",\s+которые", ". Которые", res)
+    res = re.sub(r",\s+что", ". Что", res)
+
+    # подчистим пробелы/скобки
+    res = re.sub(r"\s+([,.:;!?])", r"\1", res)
+    res = re.sub(r"\(\s+", "(", res)
+    res = re.sub(r"\s+\)", ")", res)
+    res = re.sub(r"\s+", " ", res).strip()
+
+    # не допускаем слишком сильных изменений: если укатали <60% исходной длины — вернём исходник
+    if len(res) < len(original)*0.6:
+        return original
+    return res
+
+# ========= Подпись/HTML =========
 def html_escape(s: str) -> str:
     return (s or "").replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
@@ -318,25 +454,22 @@ def build_full_caption(title, p1, p2, p3, link, hidden_tags):
     title_html = f"<b>{html_escape(title)}</b>"
     body_plain = smart_join_and_trim([p1, p2, p3], max_len=1024-220)
     body_html  = html_escape(body_plain)
-
     footer = [
         f'Источник: <a href="{html_escape(link)}">{html_escape(dom)}</a>',
         f'🪙 <a href="https://t.me/{CHANNEL_ID.lstrip("@")}">USDT=Dollar</a>'
     ]
     caption = f"{title_html}\n\n{body_html}\n\n" + "\n".join(footer)
-
     if hidden_tags:
         inner = hidden_tags.strip("|")
         spoiler = f'\n\n<span class="tg-spoiler">{html_escape(inner)}</span>'
         if len(caption + spoiler) <= 1024:
             return caption + spoiler
-
     if len(caption) > 1024:
         main = smart_join_and_trim([body_plain], max_len=1024 - 100 - len("\n".join(footer)))
         caption = f"{title_html}\n\n{html_escape(main)}\n\n" + "\n".join(footer)
     return caption
 
-# ========= Отправка (как канал) =========
+# ========= Отправка =========
 def send_photo_with_caption(photo_bytes: io.BytesIO, caption: str):
     if not BOT_TOKEN: raise RuntimeError("BOT_TOKEN не задан")
     if not CHANNEL_ID or not CHANNEL_ID.startswith("@"):
@@ -348,7 +481,7 @@ def send_photo_with_caption(photo_bytes: io.BytesIO, caption: str):
     print("Telegram sendPhoto:", r.status_code, r.text[:180])
     r.raise_for_status()
 
-# ========= Формирование 3 абзацев без повторов =========
+# ========= Формирование 3 абзацев =========
 def build_three_paragraphs_scientific(title, summary_text):
     sents = [s.strip() for s in split_sentences(summary_text) if s.strip()]
     uniq = []
@@ -373,7 +506,7 @@ def build_three_paragraphs_scientific(title, summary_text):
     p3 = tidy_paragraph(p3) if p3 else ""
     return p1, p2, p3
 
-# ========= Поток обработки =========
+# ========= Обработка ленты =========
 def _process_entries(entries, state, posted_uids, batch_seen, now, posted):
     for e in entries:
         if posted[0] >= MAX_POSTS_PER_RUN:
@@ -390,16 +523,19 @@ def _process_entries(entries, state, posted_uids, batch_seen, now, posted):
         if uid in posted_uids or uid in batch_seen:
             continue
 
-        title_ru = tidy_paragraph(title)
-        p1, p2, p3 = build_three_paragraphs_scientific(title_ru, summary)
+        # ЛЁГКИЙ ПАРАФРАЗ заголовка и текста (с факт-стоперами)
+        title_ru   = tidy_paragraph(paraphrase_ru(title, target_ratio=0.35))
+        summary_ru = paraphrase_ru(summary, target_ratio=0.5)
+
+        p1, p2, p3 = build_three_paragraphs_scientific(title_ru, summary_ru)
         body_len = len((p1 + " " + p2 + " " + p3).strip())
         if body_len < LOW_QUALITY_MIN_LEN:
             print("Skip low-quality item:", title_ru[:90]); continue
 
         domain = re.sub(r"^www\.", "", link.split("/")[2]) if link else "source"
-        themed_hint = (title_ru + " " + summary)
+        themed_hint = (title_ru + " " + summary_ru)
         card   = draw_card(title_ru, domain, now, themed_hint=themed_hint)
-        hidden = extract_tags_source(title_ru + " " + summary, 3, 5)
+        hidden = extract_tags_source(title_ru + " " + summary_ru, 3, 5)
         caption = build_full_caption(title_ru, p1, p2, p3, link, hidden)
 
         try:
