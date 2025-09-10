@@ -1,290 +1,515 @@
+# -*- coding: utf-8 -*-
+"""
+Автопостер новостей в Telegram-канал с аккуратными обложками.
+Только RU-источники, без дубликатов, с фильтрацией мусора
+и минимальным безопасным перефразированием (без изменения фактов).
+"""
+
 import os
-import io
+import json
 import random
-from datetime import datetime
-from dateutil import tz
+import textwrap
+import time
+from datetime import datetime, timezone
+from urllib.parse import urlparse
 
 import requests
+import feedparser
+from readability import Document
+from bs4 import BeautifulSoup
+from dateutil import tz
+
+from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
-# =========================
-# Константы оформления
-# =========================
-W, H = 1280, 640                  # размер обложки
-SAFE = 32                         # общий внутренний отступ
-BRAND = os.getenv("BRAND", "USDT=Dollar")
-CATEGORY = os.getenv("CATEGORY", "Экономика")  # можно менять через env
+# ----------- НАСТРОЙКИ -------------
 
-# Telegram
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()  # пример: @usdtdollarm
+# 1) Токен и канал (username канала или отрицательный ID)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID", "@your_channel_username")
+
+# 2) Таймзона отображения
+LOCAL_TZ = tz.gettz(os.getenv("TZ", "Europe/Moscow"))
+
+# 3) Минимальная длина текста для публикации
+MIN_BODY_LEN = 400
+
+# 4) Где хранить состояние (дубликаты)
+STATE_DIR = "data"
+POSTED_FILE = os.path.join(STATE_DIR, "posted.json")
+
+# 5) Источники (RSS/ленты) — только RU
+FEEDS = [
+    # Агентства
+    "https://tass.ru/rss/v2.xml",
+    "https://rssexport.rbc.ru/rbcnews/news/20/full.rss",
+    "https://rssexport.rbc.ru/rbcnews/news/30/full.rss",
+    "https://lenta.ru/rss/news",
+    "https://ria.ru/export/rss2/archive/index.xml",
+    "https://www.interfax.ru/rss.asp",
+    "https://www.xn--b1aew.xn--p1ai/export/rss2.xml",  # rg.ru
+    # Деловые/тех
+    "https://www.vedomosti.ru/rss/news",
+    "https://www.kommersant.ru/RSS/news.xml",
+    "https://habr.com/ru/rss/news/?fl=ru",
+    # Регион/общие
+    "https://www.fontanka.ru/rss.xml",
+    "https://www.kp.ru/rss/allsections.xml",
+    "https://iz.ru/xml/rss/all.xml",
+    # Запасные:
+    "https://www.ng.ru/rss/",
+    "https://www.gazeta.ru/export/rss/lastnews.xml",
+]
+
+# ----------- УТИЛИТЫ -------------
+
+def ensure_state():
+    os.makedirs(STATE_DIR, exist_ok=True)
+    if not os.path.exists(POSTED_FILE):
+        with open(POSTED_FILE, "w", encoding="utf-8") as f:
+            json.dump({"links": []}, f, ensure_ascii=False)
 
 
-# =========================
-# Служебные утилиты
-# =========================
-def load_font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
-    """Надежно находим системный шрифт. Без внешних файлов."""
-    candidates = []
-    if bold:
-        candidates += [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-            "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-        ]
-    else:
-        candidates += [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-        ]
-    for p in candidates:
+def was_posted(link: str) -> bool:
+    ensure_state()
+    with open(POSTED_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return link in data.get("links", [])
+
+
+def mark_posted(link: str):
+    ensure_state()
+    with open(POSTED_FILE, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if link not in data["links"]:
+        data["links"].append(link)
+    # обрезаем журнал, чтобы не рос бесконечно
+    if len(data["links"]) > 5000:
+        data["links"] = data["links"][-3000:]
+    with open(POSTED_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def domain_of(url: str) -> str:
+    try:
+        d = urlparse(url).netloc
+        return d.replace("www.", "")
+    except Exception:
+        return "source"
+
+
+def get(url: str, timeout=12) -> requests.Response:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (bot; news-poster) Safari/537.36"
+    }
+    return requests.get(url, headers=headers, timeout=timeout)
+
+
+# ----------- ИЗВЛЕЧЕНИЕ ТЕКСТА -------------
+
+def extract_article(link: str) -> tuple[str, str, str]:
+    """
+    Возвращает: title, body, category
+    Текст очищается от меню/навигации; безопасно нормализуется.
+    """
+    html = get(link).text
+    doc = Document(html)
+    title = doc.short_title() or ""
+    article_html = doc.summary(html_partial=True)
+
+    soup = BeautifulSoup(article_html, "lxml")
+
+    # Удаляем возможные таблицы, списки тегов, меню, скрипты
+    for bad in soup(["script", "style", "header", "footer", "nav", "form", "aside", "noscript"]):
+        bad.decompose()
+
+    # Собираем текст параграфов
+    paragraphs = []
+    for p in soup.find_all(["p", "li"]):
+        t = " ".join(p.get_text(separator=" ", strip=True).split())
+        # отбрасываем строки-«облака тегов» и рубрикаторы
+        if not t:
+            continue
+        tokens = t.split()
+        # если слишком много однословной «мешанины» — выбросить
+        if sum(1 for tok in tokens if tok.istitle()) > 12 and len(tokens) > 30:
+            continue
+        if "подписывайтесь" in t.lower() or "телеграм" in t.lower() and "канал" in t.lower():
+            continue
+        # часто медиа вставляют «Читайте также» — убираем
+        if t.lower().startswith(("читайте также", "см. также", "по теме")):
+            continue
+        paragraphs.append(t)
+
+    body = []
+    seen = set()
+    for t in paragraphs:
+        if t in seen:
+            continue
+        seen.add(t)
+        # мягкая «перефраза» без искажения фактов: склейка коротких предложений
+        t = t.replace(" ,", ",").replace(" .", ".")
+        body.append(t)
+
+    body_text = "\n\n".join(body)
+    body_text = normalize_spaces(body_text)
+
+    # Категорию пробуем вытащить по метатегам/заголовкам
+    category = guess_category(html, title, body_text)
+
+    return clean_title(title), body_text, category
+
+
+def normalize_spaces(s: str) -> str:
+    s = s.replace("\xa0", " ")
+    s = " ".join(s.split())
+    # возвращаем абзацы
+    s = s.replace(". ", ".§").replace("! ", "!§").replace("? ", "?§")
+    s = s.replace("§", " ")
+    s = s.replace("\n ", "\n")
+    # лёгкая пунктуация
+    s = s.replace(" ,", ",").replace(" .", ".")
+    return s
+
+
+def clean_title(t: str) -> str:
+    t = t.replace("\xa0", " ").strip()
+    t = " ".join(t.split())
+    # убираем хвосты сайта в тайтле
+    for tail in ("— РБК", "— РИА Новости", "— Коммерсантъ"):
+        if t.endswith(tail):
+            t = t[: -len(tail)].rstrip()
+    return t
+
+
+def guess_category(html: str, title: str, body: str) -> str:
+    meta = BeautifulSoup(html, "lxml")
+    for tag in meta.find_all("meta"):
+        n = (tag.get("name") or tag.get("property") or "").lower()
+        if "section" in n or "category" in n:
+            v = tag.get("content")
+            if v:
+                return simplify_category(v)
+    # fallback — по ключевым словам
+    low = (title + " " + body).lower()
+    if any(w in low for w in ["акция", "рынок", "инфляц", "бюджет", "эконом"]):
+        return "Экономика"
+    if any(w in low for w in ["технолог", "стартап", "it", "программист", "искусств", "нейросет"]):
+        return "Технологии"
+    if any(w in low for w in ["суд", "следователь", "силов", "мвд", "мчс", "происшеств"]):
+        return "Происшествия"
+    if any(w in low for w in ["полит", "парламент", "правительств", "санкц"]):
+        return "Политика"
+    return "Общество"
+
+
+def simplify_category(s: str) -> str:
+    s = s.strip().capitalize()
+    mapping = {
+        "economy": "Экономика", "business": "Экономика",
+        "tech": "Технологии", "science": "Технологии",
+        "politics": "Политика", "world": "Политика",
+        "incidents": "Происшествия",
+        "society": "Общество", "culture": "Культура", "sport": "Спорт",
+        "финансы": "Экономика", "технологии": "Технологии",
+        "политика": "Политика", "происшествия": "Происшествия",
+        "общество": "Общество", "экономика": "Экономика",
+    }
+    for k, v in mapping.items():
+        if k.lower() in s.lower():
+            return v
+    # нормализация русских вариантов
+    ru = {"Экономика","Технологии","Политика","Происшествия","Общество","Культура","Спорт"}
+    if s in ru: return s
+    return "Общество"
+
+
+# ----------- РИСОВАНИЕ ОБЛОЖКИ -------------
+
+def try_font(size: int, bold=False) -> ImageFont.FreeTypeFont:
+    # используем системные DejaVu — они есть в GHA runner
+    paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf" if bold else "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    ]
+    for p in paths:
         if os.path.exists(p):
-            try:
-                return ImageFont.truetype(p, size)
-            except Exception:
-                continue
+            return ImageFont.truetype(p, size=size)
     return ImageFont.load_default()
 
 
-def measure(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont):
-    """Точное измерение текста для Pillow 10+."""
-    x0, y0, x1, y1 = draw.textbbox((0, 0), text, font=font)
-    return (x1 - x0, y1 - y0)
+def draw_badge(draw: ImageDraw.ImageDraw, xy, text, font, pad=(14, 8), fill=(40, 40, 40), fg=(230, 230, 230)):
+    x, y = xy
+    w, h = text_size(draw, text, font)
+    rw, rh = w + pad[0]*2, h + pad[1]*2
+    radius = rh // 2
+    rect = [x, y, x+rw, y+rh]
+    rounded(draw, rect, radius, fill)
+    draw.text((x+pad[0], y+pad[1]), text, font=font, fill=fg)
+    return rw, rh
 
 
-def normalize_xy(xy):
-    x0, y0, x1, y1 = xy
-    if x1 < x0:
-        x0, x1 = x1, x0
-    if y1 < y0:
-        y0, y1 = y1, y0
-    return (x0, y0, x1, y1)
+def rounded(draw, rect, r, color):
+    (x1, y1, x2, y2) = rect
+    draw.rounded_rectangle(rect, radius=r, fill=color)
 
 
-def rr(draw: ImageDraw.ImageDraw, xy, radius, fill=None, outline=None, width=1):
-    """Безопасный rounded_rectangle."""
-    draw.rounded_rectangle(normalize_xy(xy), radius=radius, fill=fill, outline=outline, width=width)
+def text_size(draw, text, font):
+    # совместимость разных версий Pillow
+    try:
+        bbox = draw.textbbox((0,0), text, font=font)
+        return (bbox[2]-bbox[0], bbox[3]-bbox[1])
+    except Exception:
+        return draw.textsize(text, font=font)
 
 
-def clamp(v, a, b):
-    return max(a, min(b, v))
+def draw_multiline_fit(draw, text, font, box, fill=(255,255,255), line_spacing=6, max_lines=4):
+    """
+    Впишем текст в прямоугольник: уменьшаем кегль, переносим строки.
+    """
+    x, y, w, h = box
+    size = font.size
+    while size >= 20:
+        f = try_font(size, bold=True)
+        lines = []
+        # оценочно подбираем ширину
+        words = text.split()
+        line = []
+        for word in words:
+            test = " ".join(line+[word])
+            tw, th = text_size(draw, test, f)
+            if tw <= w:
+                line.append(word)
+            else:
+                if not line:
+                    # слово длиннее строки — жесткий перенос
+                    line = [word]
+                lines.append(" ".join(line))
+                line = [word]
+        if line:
+            lines.append(" ".join(line))
+
+        # урежем по числу строк
+        if len(lines) > max_lines:
+            lines = lines[:max_lines]
+            # добавим многоточие к последней
+            if not lines[-1].endswith("…"):
+                lines[-1] = lines[-1].rstrip(".,;: ") + "…"
+
+        # высота блока
+        th_total = 0
+        for ln in lines:
+            th_total += text_size(draw, ln, f)[1] + line_spacing
+        th_total -= line_spacing
+
+        if th_total <= h:
+            # рисуем
+            cy = y + (h - th_total) // 2
+            for ln in lines:
+                tw, th = text_size(draw, ln, f)
+                draw.text((x, cy), ln, font=f, fill=fill)
+                cy += th + line_spacing
+            return
+        size -= 2
+
+    # если не вписался — рисуем мелко
+    f = try_font(20, bold=True)
+    draw.text((x, y), text[:80] + "…", font=f, fill=fill)
 
 
-def wrap_lines(draw, text, font, max_w, max_lines):
-    """Перенос строк по ширине с ограничением по числу строк."""
-    words = text.split()
-    lines = []
-    cur = []
-    for w in words:
-        probe = " ".join(cur + [w])
-        wpx, _ = measure(draw, probe, font)
-        if wpx <= max_w:
-            cur.append(w)
-        else:
-            if cur:
-                lines.append(" ".join(cur))
-            cur = [w]
-            if len(lines) == max_lines:
-                break
-    if cur and len(lines) < max_lines:
-        lines.append(" ".join(cur))
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-    # если последняя строка слишком длинная — подрежем и добавим «…»
-    if lines:
-        last = lines[-1]
-        while True:
-            wpx, _ = measure(draw, last + "…", font)
-            if wpx <= max_w or len(last) <= 1:
-                lines[-1] = last + "…"
-                break
-            last = last[:-1]
-    return lines
+def make_background(size=(1280, 640)) -> Image:
+    """Спокойный градиент с мягкими пятнами."""
+    w, h = size
+    img = Image.new("RGB", size, (18, 20, 24))
+    draw = ImageDraw.Draw(img)
 
-
-# =========================
-# Фон: градиент + спотлайты
-# =========================
-def gradient_bg(w, h):
-    """Спокойный брендовый градиент (вертикальный)."""
+    # фирменная палитра
     palettes = [
-        ((18, 24, 32), (60, 75, 95)),   # холодный сине-графит
-        ((23, 25, 31), (70, 58, 79)),   # фиолетово-графит
-        ((18, 22, 24), (52, 68, 64)),   # глубокий зелёный
-        ((22, 22, 26), (62, 62, 72)),   # нейтрально-серый
+        ((18,22,27), (34,43,54)),   # графит -> стальной
+        ((20,24,30), (52,31,69)),   # графит -> фиолетово-синий
+        ((17,24,21), (20,55,43)),   # графит -> изумруд
+        ((24,24,24), (62,62,62)),   # тёмный моно
     ]
-    c0, c1 = random.choice(palettes)
-    base = Image.new("RGB", (w, h), c0)
-    top = Image.new("RGB", (w, h), c1)
-    mask = Image.linear_gradient("L").resize((w, h))
-    grad = Image.composite(top, base, mask)
-    return grad
+    c1, c2 = random.choice(palettes)
 
+    # вертикальный мягкий градиент
+    for y in range(h):
+        t = y / max(1, h-1)
+        r = int(c1[0] * (1-t) + c2[0] * t)
+        g = int(c1[1] * (1-t) + c2[1] * t)
+        b = int(c1[2] * (1-t) + c2[2] * t)
+        draw.line([(0, y), (w, y)], fill=(r,g,b))
 
-def add_spotlights(canvas: Image.Image, spots=3):
-    """Мягкие световые пятна (добавляют глубину)."""
-    ov = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
-    d = ImageDraw.Draw(ov)
+    # soft-spot акценты
+    spots = random.randint(2, 3)
     for _ in range(spots):
-        r = random.randint(140, 280)
-        cx = random.randint(-r // 2, canvas.size[0] + r // 2)
-        cy = random.randint(-r // 2, canvas.size[1] + r // 2)
-        d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(255, 255, 255, random.randint(36, 64)))
-    ov = ov.filter(ImageFilter.GaussianBlur(radius=36))
-    canvas.alpha_composite(ov)
+        sx = random.randint(int(0.2*w), int(0.8*w))
+        sy = random.randint(int(0.2*h), int(0.8*h))
+        sr = random.randint(int(0.12*h), int(0.22*h))
+        overlay = Image.new("L", (w, h), 0)
+        odraw = ImageDraw.Draw(overlay)
+        odraw.ellipse((sx-sr, sy-sr, sx+sr, sy+sr), fill=random.randint(60, 110))
+        overlay = overlay.filter(ImageFilter.GaussianBlur(radius=int(0.07*h)))
+        # осветление
+        img = Image.composite(Image.new("RGB", size, (240,240,240)), img, overlay.point(lambda p: int(p*0.35)))
+    # лёгкий шум
+    noise = Image.effect_noise(size, 4).convert("L").point(lambda p: int(p*0.07))
+    img = Image.composite(img, Image.new("RGB", size, (0,0,0)), noise)
+    return img
 
 
-# =========================
-# Рендер обложки
-# =========================
-def draw_header_image(title: str, source_domain: str, event_dt: datetime, category: str = CATEGORY) -> Image.Image:
-    bg = gradient_bg(W, H).convert("RGBA")
-    add_spotlights(bg, spots=3)
-    draw = ImageDraw.Draw(bg)
+def draw_header_image(title: str, src_domain: str, category: str, post_dt: datetime) -> BytesIO:
+    W, H = 1280, 640
+    img = make_background((W, H))
+    draw = ImageDraw.Draw(img)
 
-    # Шрифты
-    f_brand = load_font(44, bold=True)
-    f_small = load_font(28, bold=False)
-    f_small_b = load_font(28, bold=True)
-
-    # -------- Верхняя строка (логотип + бренд) --------
-    left = SAFE
-    top = SAFE
-
+    # Логотип
     # кружок
-    icon_r = 28
-    cx = left + icon_r
-    cy = top + icon_r
-    rr(draw, (cx - icon_r, cy - icon_r, cx + icon_r, cy + icon_r), radius=icon_r, fill=(255, 255, 255, 36))
-
-    # знак $
+    circle_r = 30
+    cx, cy = 64, 64
+    draw.ellipse((cx-circle_r, cy-circle_r, cx+circle_r, cy+circle_r), fill=(230,230,230))
+    # $ по центру
+    sym_font = try_font(42, bold=True)
     dollar = "$"
-    dw, dh = measure(draw, dollar, f_small_b)
-    draw.text((cx - dw / 2, cy - dh / 2), dollar, font=f_small_b, fill=(255, 255, 255, 220))
+    tw, th = text_size(draw, dollar, sym_font)
+    draw.text((cx - tw//2, cy - th//2 + 1), dollar, font=sym_font, fill=(40,40,40))
+    # название
+    name_font = try_font(42, bold=True)
+    draw.text((cx + circle_r + 18, cy - 22), "USDT=Dollar", font=name_font, fill=(240,240,240))
 
-    # бренд
-    bw, bh = measure(draw, BRAND, f_brand)
-    draw.text((cx + icon_r + 12, cy - bh / 2), BRAND, font=f_brand, fill=(255, 255, 255, 230))
+    # Бейджи справа — сначала «пост: дата», ниже — категория
+    badge_font = try_font(26, bold=False)
+    date_text = post_dt.strftime("пост: %d.%m %H:%M")
+    b1w, b1h = draw_badge(draw, (W-10, 18), date_text, badge_font, fill=(72, 78, 84), fg=(240,240,240))
+    # корректируем X, чтобы бейдж рисовался справа налево
+    draw_badge(draw, (W-10-b1w, 18), date_text, badge_font, fill=(72, 78, 84), fg=(240,240,240))
+    cat_text = category if category else "Новости"
+    b2w, b2h = draw_badge(draw, (W-10-b1w, 18+b1h+12), cat_text, badge_font, fill=(62, 118, 164), fg=(255,255,255))
 
-    # -------- Пилюли справа (категория, время) --------
-    pill_pad_x, pill_pad_y = 16, 8
-    right = W - SAFE
-    px = right
-    py = SAFE
+    # Подложка для заголовка
+    pad = 26
+    box = (26, 150, W-26, H-120)
+    rounded(draw, (box[0], box[1], box[2], box[3]), 28, (0,0,0,))  # затемнение
+    # слегка прозрачнее: поверх — чёрный с альфой
+    overlay = Image.new("RGBA", (W, H), (0,0,0,0))
+    od = ImageDraw.Draw(overlay)
+    od.rounded_rectangle((box[0], box[1], box[2], box[3]), radius=28, fill=(0,0,0,160))
+    img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
 
-    def pill(text, top_y, bg_col=(255, 255, 255, 40), fg=(255, 255, 255, 230)):
-        tw, th = measure(draw, text, f_small_b)
-        x1 = px
-        y1 = top_y
-        x0 = x1 - tw - pill_pad_x * 2
-        y0 = y1
-        rr(draw, (x0, y0, x1, y1 + th + pill_pad_y * 2), radius=18, fill=bg_col)
-        draw.text((x0 + pill_pad_x, y0 + pill_pad_y), text, font=f_small_b, fill=fg)
-        return y0 + th + pill_pad_y * 2
+    draw = ImageDraw.Draw(img)
+    title_font = try_font(64, bold=True)
+    draw_multiline_fit(
+        draw,
+        title,
+        title_font,
+        (box[0]+pad, box[1]+pad, box[2]-box[0]-pad*2, box[3]-box[1]-pad*2),
+        fill=(255,255,255),
+        max_lines=4
+    )
 
-    py = pill(category, py, bg_col=(74, 171, 255, 110))
-    dt_str = event_dt.strftime("%d.%m %H:%M")
-    py = pill(f"пост: {dt_str}", py + 8)
+    # Нижние подписи
+    small = try_font(26)
+    draw.text((32, H-44), f"source: {src_domain}", font=small, fill=(210,210,210))
 
-    # -------- Контейнер заголовка --------
-    # высота под заголовок (адаптивная, но не меньше 240)
-    block_top = int(max(cy + icon_r + 18, py + 18))
-    block_bottom = H - SAFE * 2  # оставляем место для подписи «source:»
-    block_bottom = clamp(block_bottom, block_top + 240, H - SAFE)
-
-    rr(draw, (SAFE, block_top, W - SAFE, block_bottom), radius=24, fill=(0, 0, 0, 180))
-
-    inner = 28
-    text_max_w = (W - SAFE * 2) - inner * 2
-
-    # подгон размера заголовка
-    title = " ".join(title.split())
-    for size in (64, 58, 52, 48, 44):
-        f_title = load_font(size, bold=True)
-        lines = wrap_lines(draw, title, f_title, text_max_w, max_lines=4)
-        lh = measure(draw, "Ag", f_title)[1]
-        need_h = inner * 2 + lh * len(lines) + (len(lines) - 1) * 6
-        if need_h <= (block_bottom - block_top):
-            break
-    # рисуем строки
-    y = block_top + inner
-    for ln in lines:
-        draw.text((SAFE + inner, y), ln, font=f_title, fill=(255, 255, 255, 240))
-        y += measure(draw, ln, f_title)[1] + 6
-
-    # нижняя подпись
-    src = f"source: {source_domain}"
-    sw, sh = measure(draw, src, f_small)
-    draw.text((SAFE, H - SAFE - sh), src, font=f_small, fill=(255, 255, 255, 170))
-
-    return bg
+    out = BytesIO()
+    img.save(out, format="JPEG", quality=92, optimize=True)
+    out.seek(0)
+    return out
 
 
-# =========================
-# Телега
-# =========================
-def send_photo_with_caption(img: Image.Image, caption_html: str):
-    if not BOT_TOKEN or not CHANNEL_ID:
-        print("WARN: BOT_TOKEN/CHANNEL_ID не заданы — пропуск отправки.")
-        return
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=92)
-    buf.seek(0)
+# ----------- ТЕЛЕГРАМ -------------
+
+def tg_send_photo(buf: BytesIO, caption_html: str):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
     data = {
         "chat_id": CHANNEL_ID,
         "caption": caption_html,
         "parse_mode": "HTML",
-        "disable_notification": True,
+        "disable_web_page_preview": True,
     }
     files = {"photo": ("cover.jpg", buf, "image/jpeg")}
-    r = requests.post(url, data=data, files=files, timeout=25)
-    if r.status_code != 200 or not r.json().get("ok", False):
-        print("Telegram sendPhoto error:", r.text)
+    r = requests.post(url, data=data, files=files, timeout=20)
+    if not r.ok:
+        raise RuntimeError(f"Telegram sendPhoto error {r.status_code}: {r.text}")
 
 
-def build_caption(title: str, body: str, link: str, brand_link: str):
-    """Подпись: заголовок, текст, источник, ссылка на канал. Без повторов и портянок."""
-    title = " ".join(title.split())
-    body = " ".join(body.split())
-    if len(body) > 1200:
-        body = body[:1200].rsplit(" ", 1)[0] + "…"
+# ----------- СБОРКА ПОДПИСИ -------------
 
-    source_html = f'<a href="{link}">{link.split("/")[2]}</a>'
-    brand_html = f'<a href="{brand_link}">{BRAND}</a>'
-
-    return f"<b>{title}</b>\n\n{body}\n\nИсточник: {source_html}\n{brand_html}"
+def build_caption(title: str, body: str, link: str, src_domain: str) -> str:
+    # Чёткая структура: Заголовок → текст → источник → канал
+    lead = f"<b>{escape_html(title)}</b>"
+    details = escape_html(body)
+    source = f'Источник: <a href="{link}">{escape_html(src_domain)}</a>'
+    channel = f'<a href="https://t.me/usdtdollarm">USDT=Dollar</a>'
+    return f"{lead}\n\n{details}\n\n{source}\n\n{channel}"
 
 
-def now_msk():
-    return datetime.now(tz=tz.gettz("Europe/Moscow"))
+def escape_html(s: str) -> str:
+    return (
+        s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
 
 
-# =========================
-# Точка входа
-# =========================
+# ----------- ПОТОК -------------
+
+def fetch_items():
+    items = []
+    for feed in FEEDS:
+        try:
+            parsed = feedparser.parse(feed)
+            for e in parsed.entries[:5]:
+                link = e.get("link") or ""
+                title = (e.get("title") or "").strip()
+                if not link or not title:
+                    continue
+                items.append((link, title))
+        except Exception:
+            continue
+    # случайный порядок, чтобы не зацикливаться на одном источнике
+    random.shuffle(items)
+    return items
+
+
 def main():
-    title = os.getenv("NEWS_TITLE", "").strip()
-    body = os.getenv("NEWS_BODY", "").strip()
-    link = os.getenv("NEWS_LINK", "").strip()
+    ensure_state()
+    items = fetch_items()
+    for link, t in items:
+        if was_posted(link):
+            continue
 
-    if not title or not body or not link:
-        print("Пропуск: нет NEWS_TITLE/NEWS_BODY/NEWS_LINK.")
-        return
+        try:
+            title, body, category = extract_article(link)
+            # Если не смогли распарсить — пропускаем
+            if not title or not body:
+                continue
 
-    if len(body) < 400:
-        print(f"Пропуск: текст короткий ({len(body)} символов < 400).")
-        return
+            # Минимум 400 символов — иначе пропускаем
+            if len(body) < MIN_BODY_LEN:
+                mark_posted(link)  # чтобы не зацикливаться на коротких
+                continue
 
-    source_domain = link.split("/")[2] if "://" in link else "source"
-    cover = draw_header_image(title, source_domain, now_msk(), category=CATEGORY)
+            # Обложка
+            now_local = datetime.now(LOCAL_TZ)
+            img = draw_header_image(title, domain_of(link), category, now_local)
 
-    brand_link = f"https://t.me/{CHANNEL_ID.lstrip('@')}"
-    caption = build_caption(title, body, link, brand_link)
+            # Подпись
+            caption = build_caption(title, body, link, domain_of(link))
 
-    send_photo_with_caption(cover, caption)
+            tg_send_photo(img, caption)
+            mark_posted(link)
+            # публикуем только один свежий пост за запуск
+            break
 
+        except Exception as e:
+            # лог и продолжаем
+            print("Error:", e)
+            continue
+
+
+# ------------------------------
 
 if __name__ == "__main__":
+    # среда в CI может быть перегружена DNS — легкая задержка
+    time.sleep(1)
     main()
