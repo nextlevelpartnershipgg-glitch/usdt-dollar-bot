@@ -1,7 +1,4 @@
-feedparser
-requests
-beautifulsoup4
-python-dateutil
-Pillow
-pymorphy2
-pymorphy2-dicts-ru
+feedparser==6.0.11
+beautifulsoup4==4.12.3
+requests==2.32.3
+Pillow==10.3.0
