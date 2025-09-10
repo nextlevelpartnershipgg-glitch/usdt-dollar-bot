@@ -1,59 +1,61 @@
 # -*- coding: utf-8 -*-
-import os, io, json, random, time, re, math
+import os, io, json, random, time, math, re
 from html import unescape
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import requests
 import feedparser
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
-# ================== НАСТРОЙКИ ==================
+# ----------------------- НАСТРОЙКИ -----------------------
 
-# Русскоязычные источники
+# Только русские источники (RSS/Atom)
 RSS_FEEDS = [
+    # РБК
     "https://rssexport.rbc.ru/rbcnews/news/20/full.rss",
-    "https://rssexport.rbc.ru/rbcnews/economics/20/full.rss",
+    "https://rssexport.rbc.ru/rbcnews/society/20/full.rss",
+    # Лента
     "https://lenta.ru/rss/news",
+    # Коммерсант
     "https://www.kommersant.ru/RSS/news.xml",
+    # ТАСС
     "https://tass.ru/rss/v2.xml",
+    # Газета.Ru
     "https://www.gazeta.ru/export/rss/lenta.xml",
+    # Ведомости
     "https://www.vedomosti.ru/rss/news",
+    # Интерфакс
     "https://www.interfax.ru/rss.asp",
+    # Прайм
     "https://1prime.ru/export/rss2/index.xml",
+    # РБК-спорт/экономика как запас
+    "https://rssexport.rbc.ru/rbcnews/economics/20/full.rss",
 ]
 
-# Сколько новостей публиковать за один прогон
+# Сколько постов максимум за один прогон
 MAX_POSTS_PER_RUN = int(os.getenv("MAX_POSTS_PER_RUN", "1"))
 
-# «Свежесть» новости
-FRESH_WINDOW_MIN = int(os.getenv("FRESH_WINDOW_MIN", "25"))   # берём только свежие
-FALLBACK_ON_NO_FRESH = int(os.getenv("FALLBACK_ON_NO_FRESH", "1"))
-FALLBACK_WINDOW_MIN = int(os.getenv("FALLBACK_WINDOW_MIN", "360"))
+# Временные окна: свежие новости (минуты)
+FRESH_WINDOW_MIN = int(os.getenv("FRESH_WINDOW_MIN", "25"))  # берём только свежак
+FALLBACK_ON_NO_FRESH = int(os.getenv("FALLBACK_ON_NO_FRESH", "1"))  # если нет свежих, разрешить старые
+FALLBACK_WINDOW_MIN = int(os.getenv("FALLBACK_WINDOW_MIN", "360"))  # окно для "не очень свежих"
 
-# Хранилище состояния (анти-дубликаты)
+# Где хранить state (анти-дубль)
 STATE_DIR = "data"
 STATE_PATH = os.path.join(STATE_DIR, "state.json")
 
-# Таймзона
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")
 TZ = ZoneInfo(TIMEZONE)
 
-# Секреты (НЕ хардкодить токен в код)
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 CHANNEL_ID = os.getenv("CHANNEL_ID", "").strip()
 
-# Временные «фолбэки» (можешь руками подставить для локального теста,
-# но в проде держи в Secrets):
-if not CHANNEL_ID:
-    CHANNEL_ID = "@usdtdollarm"   # ок публично
-# if not BOT_TOKEN: BOT_TOKEN = "ВСТАВЬ_СЮДА_ТОКЕН_Только_для_локального_теста"
-
-# Шрифты
+# Шрифты (если нет локальных — используем DejaVuSans)
 FONT_BOLD = os.path.join("data", "DejaVuSans-Bold.ttf")
-FONT_REG  = os.path.join("data", "DejaVuSans.ttf")
+FONT_REG = os.path.join("data", "DejaVuSans.ttf")
 
-# ================== УТИЛИТЫ ТЕКСТА ==================
+# ----------------------- УТИЛИТЫ -------------------------
 
 def now_local():
     return datetime.now(TZ)
@@ -77,19 +79,20 @@ def html_escape(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 def sanitize_source_text(x: str) -> str:
-    """Снять HTML-сущности, убрать теги, почистить пробелы и «кривые» кавычки/тире."""
+    """HTML→текст: снимаем экранирование, выбрасываем теги, чиним кавычки/тире/пробелы."""
     x = unescape(x or "")
-    x = re.sub(r"<[^>]+>", " ", x)
+    x = re.sub(r"<[^>]+>", " ", x)  # убрать HTML-теги
     x = x.replace("\xa0", " ").replace("&nbsp;", " ")
     x = (x.replace("&laquo;", "«").replace("&raquo;", "»")
            .replace("&mdash;", "—").replace("&ndash;", "–")
            .replace("&quot;", "«").replace("&apos;", "’")
            .replace("&amp;", "&"))
-    x = re.sub(r"\s+([,.;:!?])", r"\1", x)
+    x = re.sub(r"\s+([,.;:!?])", r"\1", x)  # убрать пробел перед пунктуацией
     x = re.sub(r"\s{2,}", " ", x).strip()
     return x
 
 def split_sentences(text: str):
+    # простая, но устойчиво работает для коротких анонсов
     parts = re.split(r"(?<=[.!?])\s+(?=[А-ЯЁA-Z0-9])", text or "")
     return [p.strip() for p in parts if p.strip()]
 
@@ -110,7 +113,9 @@ def smart_join_and_trim(paragraphs, max_len=1000):
     txt = "\n\n".join([p for p in paragraphs if p])
     if len(txt) <= max_len:
         return txt
-    res, total = [], 0
+    # «умная» обрезка по абзацам
+    res = []
+    total = 0
     for p in paragraphs:
         if not p: 
             continue
@@ -118,16 +123,18 @@ def smart_join_and_trim(paragraphs, max_len=1000):
             res.append(p); total += len(p) + 2
         else:
             tail = p[: max(0, max_len - total - 1)].rstrip()
-            if tail: res.append(tail + "…")
+            if tail:
+                res.append(tail + "…")
             break
     return "\n\n".join(res).strip()
 
-# ================== БЕЗОПАСНЫЙ ПЕРЕФРАЗ ==================
+# ----------------------- БЕЗОПАСНЫЙ ПЕРЕФРАЗ -------------------------
 
 PHRASES = [
+    (r"\bсообщил\(а\)?\b", "заявил"),
     (r"\bсообщается\b", "уточнили"),
-    (r"\bпо его словам\b", "как подчеркнули"),
     (r"\bпояснил\(а\)?\b", "отметил"),
+    (r"\bпо его словам\b", "как подчеркнули"),
 ]
 
 SYN_MAP = {
@@ -136,6 +143,7 @@ SYN_MAP = {
     "заявил": ["сообщил", "подчеркнул", "уточнил"],
     "отметил": ["подчеркнул", "уточнил"],
     "в связи": ["из-за", "на фоне"],
+    "из-за": ["в связи", "на фоне"],
     "рассказал": ["сообщил", "пояснил"],
     "сообщило": ["заявили", "подтвердили"],
 }
@@ -144,6 +152,7 @@ SENSITIVE_TERMS = [
     "приговор", "приговорили", "осудили", "суд", "колони", "арест",
     "задержан", "следствие", "уголовн", "штраф", "исков", "прокуратур",
 ]
+
 DONT_INVENT_TERMS = ["колони", "лет", "месяц", "суток", "штраф", "миллион", "тыс", "приговор"]
 
 _NUM_RE = re.compile(r"\b\d+[ \u00A0]?(?:[.,]\d+)?\b")
@@ -160,7 +169,8 @@ def _tokens_guard(text: str):
     return {"nums":nums, "dates":dates, "curs":curs, "quotes":quotes, "names":names}
 
 def _violates_guard(before: str, after: str) -> bool:
-    b, a = _tokens_guard(before), _tokens_guard(after)
+    b = _tokens_guard(before)
+    a = _tokens_guard(after)
     if not b["nums"].issubset(a["nums"]): return True
     if not b["curs"].issubset(a["curs"]): return True
     if not b["dates"].issubset(a["dates"]): return True
@@ -189,6 +199,7 @@ def paraphrase_ru_safe(text: str, target_ratio: float, conservative: bool) -> st
     if not text: return text
     original = text
 
+    # фразовые замены
     local = original
     for pat, repl in PHRASES:
         local = re.sub(pat, repl, local, flags=re.IGNORECASE)
@@ -233,8 +244,10 @@ def paraphrase_ru_safe(text: str, target_ratio: float, conservative: bool) -> st
     res = re.sub(r"\s+([,.:;!?])", r"\1", res)
     res = re.sub(r"\s+", " ", res).strip()
 
-    if _violates_guard(original, res): return original
-    if len(res) < len(original) * 0.6: return original
+    if _violates_guard(original, res):
+        return original
+    if len(res) < len(original) * 0.6:
+        return original
     return res
 
 def tidy_paragraph(p: str) -> str:
@@ -284,7 +297,7 @@ def build_sections_marketing(title: str, summary_text: str):
     conclusion = ""  # блок убран
     return title_p, lead, details, conclusion
 
-# ================== КАРТИНКА (градиент + брендинг) ==================
+# ----------------------- КАРТИНКА (градиент + брендинг) -----------------------
 
 def _rand_grad_colors():
     palettes = [
@@ -300,35 +313,31 @@ def _draw_linear_gradient(img, c1, c2):
     w, h = img.size
     base = Image.new("RGB", (w, h), c1)
     top = Image.new("RGB", (w, h), c2)
-    # создаём простую линейную маску сами (совместимо со старым Pillow)
-    mask = Image.new("L", (w, h))
-    md = ImageDraw.Draw(mask)
-    for y in range(h):
-        md.line([(0, y), (w, y)], fill=int(255 * y / (h - 1)))
+    mask = Image.linear_gradient("L").resize((w, h))
     return Image.composite(top, base, mask)
 
 def draw_header_image(title: str, source_host: str, post_dt: datetime):
     W, H = 1280, 720
     im = Image.new("RGB", (W, H), (18, 23, 28))
-    c1, c2 = _rand_grad_colors()
-    im = _draw_linear_gradient(im, c1, c2)
+    im = _draw_linear_gradient(im, *_rand_grad_colors())
     draw = ImageDraw.Draw(im)
 
-    # верхняя плашка
+    # карточка-плашка сверху
     header_h = 86
-    draw.rectangle([0, 0, W, header_h], fill=(20, 35, 55))
+    draw.rectangle([0, 0, W, header_h], fill=(20, 35, 55, 230))
 
     # логотип
+    logo_txt = "USDT=Dollar"
     font_logo = ImageFont.truetype(FONT_BOLD, 38)
-    draw.text((20, 22), "USDT=Dollar", font=font_logo, fill=(235, 242, 255))
+    draw.text((20, 22), logo_txt, font=font_logo, fill=(230, 240, 255))
 
-    # время поста
+    # время поста справа
     font_small = ImageFont.truetype(FONT_REG, 28)
     ts = post_dt.strftime("пост: %d.%m %H:%M")
-    tw, _ = draw.textsize(ts, font=font_small)
+    tw, th = draw.textsize(ts, font=font_small)
     draw.text((W - tw - 24, 24), ts, font=font_small, fill=(220, 225, 235))
 
-    # тёмная панель для заголовка
+    # затемнённая панель под заголовок
     panel = Image.new("RGBA", (W - 120, H - 240), (0, 0, 0, 90))
     im.paste(panel, (60, 140), panel)
 
@@ -336,6 +345,7 @@ def draw_header_image(title: str, source_host: str, post_dt: datetime):
     font_title = ImageFont.truetype(FONT_BOLD, 66)
     x, y = 90, 170
     max_w = W - 180
+    # перенос слов вручную
     words = title.split()
     lines, cur = [], ""
     for w in words:
@@ -344,24 +354,29 @@ def draw_header_image(title: str, source_host: str, post_dt: datetime):
         if ww <= max_w:
             cur = test
         else:
-            if cur: lines.append(cur)
-            cur = w
+            if cur: lines.append(cur); cur = w
     if cur: lines.append(cur)
+    # рисуем
     for line in lines[:5]:
         draw.text((x, y), line, font=font_title, fill=(250, 250, 255))
         y += 80
 
-    # источник
-    draw.text((60, H - 60), f"source: {source_host}", font=font_small, fill=(220, 220, 230))
+    # источник внизу слева
+    src = f"source: {source_host}"
+    draw.text((60, H - 60), src, font=font_small, fill=(220, 220, 230))
 
     out = io.BytesIO()
     im.save(out, format="JPEG", quality=92)
     out.seek(0)
     return out
 
-# ================== ПОДПИСЬ (без «что это значит») ==================
+# ----------------------- ТГ: подпись (без «что это значит») -------------------
 
 def build_full_caption(title, lead, details, conclusion, link, hidden_tags):
+    """
+    Без блока «Что это значит».
+    Аргумент `conclusion` игнорируем, чтобы не переписывать вызовы.
+    """
     dom = (re.sub(r"^www\.", "", (link or "").split("/")[2]) if link else "источник")
     title_html = f"<b>{html_escape(title)}</b>"
 
@@ -375,6 +390,7 @@ def build_full_caption(title, lead, details, conclusion, link, hidden_tags):
         f'Источник: <a href="{html_escape(link)}">{html_escape(dom)}</a>',
         f'🪙 <a href="https://t.me/{CHANNEL_ID.lstrip("@")}">USDT=Dollar</a>'
     ]
+
     caption = f"{title_html}\n\n{body_text}\n\n" + "\n".join(footer)
 
     if hidden_tags:
@@ -382,9 +398,10 @@ def build_full_caption(title, lead, details, conclusion, link, hidden_tags):
         spoiler = f'\n\n<span class="tg-spoiler">{html_escape(inner)}</span>'
         if len(caption + spoiler) <= 1024:
             return caption + spoiler
+
     return caption[:1024]
 
-# ================== РАЗБОР ЛЕНТЫ ==================
+# ----------------------- ОБРАБОТКА ЛЕНТЫ -----------------------
 
 def fetch_entries():
     items = []
@@ -392,46 +409,57 @@ def fetch_entries():
         try:
             feed = feedparser.parse(url)
             for e in feed.entries[:30]:
-                title   = sanitize_source_text((getattr(e, "title", "") or "").strip())
+                title = sanitize_source_text((getattr(e, "title", "") or "").strip())
                 summary = sanitize_source_text((getattr(e, "summary", getattr(e, "description", "")) or "").strip())
-                link    = (getattr(e, "link", "") or "").strip()
-
+                link = (getattr(e, "link", "") or "").strip()
                 # дата
+                published = None
                 if getattr(e, "published_parsed", None):
-                    dt = datetime(*e.published_parsed[:6], tzinfo=timezone.utc).astimezone(TZ)
+                    published = datetime(*e.published_parsed[:6], tzinfo=timezone.utc).astimezone(TZ)
                 elif getattr(e, "updated_parsed", None):
-                    dt = datetime(*e.updated_parsed[:6], tzinfo=timezone.utc).astimezone(TZ)
+                    published = datetime(*e.updated_parsed[:6], tzinfo=timezone.utc).astimezone(TZ)
                 else:
-                    dt = now_local()
-
+                    published = now_local()
                 items.append({
                     "id": (getattr(e, "id", link) or link),
                     "title": title,
                     "summary": summary,
                     "link": link,
-                    "published": dt,
+                    "published": published,
                     "host": (link.split("/")[2] if ("//" in link) else "news")
                 })
         except Exception as ex:
             print("feed error:", url, ex)
             continue
+    # сортируем по дате (свежее — выше)
     items.sort(key=lambda x: x["published"], reverse=True)
     return items
 
 def filter_fresh(items):
     now = now_local()
     fresh = [it for it in items if (now - it["published"]) <= timedelta(minutes=FRESH_WINDOW_MIN)]
-    if fresh: return fresh
+    if fresh:
+        return fresh
     if FALLBACK_ON_NO_FRESH:
         return [it for it in items if (now - it["published"]) <= timedelta(minutes=FALLBACK_WINDOW_MIN)]
     return []
 
+def build_post_payload(item):
+    # секции + перефраз
+    t, l, d, c = build_sections_marketing(item["title"], item["summary"])
+    caption = build_full_caption(t, l, d, c, item["link"], hidden_tags=make_hidden_tags(item))
+    # картинка
+    img = draw_header_image(t, item["host"], now_local())
+    return img, caption
+
 def make_hidden_tags(item):
+    # 3–5 ключевых существительных, без склонений (простая эвристика)
     words = re.findall(r"\b[А-ЯЁа-яё]{4,}\b", item["title"] + " " + item["summary"])
     uniq = []
     for w in words:
         lw = w.lower()
-        if lw.endswith(("ами","ями","ах","ях","ой","ей","ом","ем","ою","ею","у","ю","а","я","ы","и")):
+        if lw.endswith(("ами","ями","ами","ями","ами","ями","ах","ях","ой","ей","ом","ем","ою","ею","у","ю","а","я","ы","и")):
+            # «отсечём» окончание (очень грубо)
             lw = re.sub(r"(ами|ями|ах|ях|ой|ей|ом|ем|ою|ею|у|ю|а|я|ы|и)$", "", lw)
         if lw and lw not in uniq:
             uniq.append(lw)
@@ -439,13 +467,7 @@ def make_hidden_tags(item):
     if not uniq: return ""
     return "||#" + " #".join(uniq[:5]) + "||"
 
-def build_post_payload(item):
-    t, l, d, c = build_sections_marketing(item["title"], item["summary"])
-    caption = build_full_caption(t, l, d, c, item["link"], hidden_tags=make_hidden_tags(item))
-    img = draw_header_image(t, item["host"], now_local())
-    return img, caption
-
-# ================== ОТПРАВКА В ТГ ==================
+# ----------------------- ОТПРАВКА В ТЕЛЕГРАМ -----------------------
 
 def tg_send_photo(img_bytes: io.BytesIO, caption: str):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto"
@@ -464,10 +486,10 @@ def tg_send_photo(img_bytes: io.BytesIO, caption: str):
         print("Telegram sendPhoto OK")
     return r.json()
 
-# ================== MAIN ==================
+# ----------------------- MAIN -----------------------
 
 def main():
-    assert BOT_TOKEN and CHANNEL_ID, "BOT_TOKEN / CHANNEL_ID не заданы (положи в Secrets)."
+    assert BOT_TOKEN and CHANNEL_ID, "BOT_TOKEN / CHANNEL_ID не заданы"
 
     st = load_state()
     posted = set(st.get("posted", []))
@@ -476,24 +498,26 @@ def main():
     items = [it for it in items if it["id"] not in posted]
     items = filter_fresh(items)
     if not items:
-        print("Нет подходящих новостей (старые или уже опубликованы).")
+        print("Нет подходящих новостей (слишком старые или уже опубликованные).")
         return
 
     published_count = 0
     for it in items:
         if published_count >= MAX_POSTS_PER_RUN:
             break
+
         try:
             img, caption = build_post_payload(it)
             tg_send_photo(img, caption)
             posted.add(it["id"])
             published_count += 1
             print("Posted:", it["title"])
-            time.sleep(1.0)
+            time.sleep(1.2)
         except Exception as ex:
             print("Ошибка публикации:", ex)
             continue
 
+    # сохраняем state
     st["posted"] = list(posted)[-5000:]
     save_state(st)
 
