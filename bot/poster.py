@@ -482,15 +482,19 @@ def smart_join_and_trim(paragraphs, max_len=1024):
         if pos != -1: return cut[:pos+1].rstrip()
     return cut[:-1].rstrip() + "…"
 
-def build_full_caption(title, lead, details, conclusion, link, hidden_tags):
+ def build_full_caption(title, lead, details, conclusion, link, hidden_tags):
+    """
+    Сборка подписи без блока «Что это значит».
+    Аргумент `conclusion` намеренно игнорируется, чтобы не править все вызовы.
+    """
     dom = (re.sub(r"^www\.", "", (link or "").split("/")[2]) if link else "источник")
     title_html = f"<b>{html_escape(title)}</b>"
 
-    body = [
-        html_escape(lead),
-        f"<b>Подробности:</b>\n{html_escape(details)}" if details else "",
-        f"<b>Что это значит:</b>\n{html_escape(conclusion)}"
-    ]
+    # только лид и «Подробности»
+    body = [html_escape(lead)]
+    if details:
+        body.append(f"<b>Подробности:</b>\n{html_escape(details)}")
+
     body_text = smart_join_and_trim(body, max_len=1024-220)
 
     footer = [
@@ -499,11 +503,13 @@ def build_full_caption(title, lead, details, conclusion, link, hidden_tags):
     ]
     caption = f"{title_html}\n\n{body_text}\n\n" + "\n".join(footer)
 
+    # скрытые хэштеги-спойлеры
     if hidden_tags:
         inner = hidden_tags.strip("|")
         spoiler = f'\n\n<span class="tg-spoiler">{html_escape(inner)}</span>'
         if len(caption + spoiler) <= 1024:
             return caption + spoiler
+
     return caption[:1024]
 
 # ================== ОТПРАВКА ==================
